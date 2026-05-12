@@ -290,32 +290,43 @@ class DistinctOperatorBatchSampler(BatchSampler):
         self.shuffle = shuffle
         self.indices = list(range(len(dataset)))
 
+    def _episode(self, idx: int) -> int:
+        return int(idx % self.dataset.num_episodes)
+
+    def _compatible_with_batch(self, idx: int, batch: list[int]) -> bool:
+        ep = self._episode(idx)
+        op_id = int(self.dataset.op_id[ep])
+        params = self.dataset.op_params[ep]
+        for existing_idx in batch:
+            existing_ep = self._episode(existing_idx)
+            existing_op = int(self.dataset.op_id[existing_ep])
+            if op_id != existing_op:
+                continue
+            distance = float(np.linalg.norm(params - self.dataset.op_params[existing_ep]))
+            if distance <= self.dataset.cfg.min_law_param_distance:
+                return False
+        return True
+
     def __iter__(self):
         rng = np.random.default_rng(self.dataset.cfg.seed)
         indices = list(self.indices)
         if self.shuffle:
             rng.shuffle(indices)
-        buckets: dict[int, list[int]] = {}
-        for idx in indices:
-            ep = int(idx % self.dataset.num_episodes)
-            buckets.setdefault(int(self.dataset.op_id[ep]), []).append(idx)
-        op_ids = list(buckets)
-        if self.shuffle:
-            rng.shuffle(op_ids)
 
-        while any(buckets.values()):
+        remaining = indices
+        while remaining:
             batch: list[int] = []
-            while len(batch) < self.batch_size and any(buckets.values()):
-                round_ops = list(op_ids)
-                if self.shuffle:
-                    rng.shuffle(round_ops)
-                for op_id in round_ops:
-                    if len(batch) >= self.batch_size:
-                        break
-                    if buckets.get(op_id):
-                        batch.append(buckets[op_id].pop())
-            if not batch:
-                break
+            next_remaining: list[int] = []
+            for idx in remaining:
+                if len(batch) < self.batch_size and self._compatible_with_batch(idx, batch):
+                    batch.append(idx)
+                else:
+                    next_remaining.append(idx)
+            if len(batch) < self.batch_size and next_remaining:
+                needed = self.batch_size - len(batch)
+                batch.extend(next_remaining[:needed])
+                next_remaining = next_remaining[needed:]
+            remaining = next_remaining
             yield batch
 
     def __len__(self) -> int:

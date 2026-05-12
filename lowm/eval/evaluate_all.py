@@ -327,7 +327,13 @@ def evaluate_retrieval(model: torch.nn.Module, dataset: LOWMSynthRankingDataset,
     }
 
 
-def _mrr_from_energy_matrix(energies: torch.Tensor) -> tuple[float, float, float, float]:
+def _same_operator_matrix(op_id: torch.Tensor, op_params: torch.Tensor, threshold: float) -> torch.Tensor:
+    same_id = op_id[:, None] == op_id[None, :]
+    distances = torch.linalg.norm(op_params[:, None, :] - op_params[None, :, :], dim=-1)
+    return same_id | (distances <= float(threshold))
+
+
+def _occl_batch_metrics(energies: torch.Tensor, op_id: torch.Tensor, op_params: torch.Tensor, threshold: float) -> dict[str, float]:
     labels = torch.arange(energies.shape[0], device=energies.device)
     logits = -energies
     tau_pred = torch.argmax(logits, dim=1)
@@ -335,12 +341,27 @@ def _mrr_from_energy_matrix(energies: torch.Tensor) -> tuple[float, float, float
     diag = energies.diag()
     tau_ranks = (energies < diag[:, None]).sum(dim=1) + 1
     lambda_ranks = (energies < diag[None, :]).sum(dim=0) + 1
-    return (
-        float((tau_pred == labels).float().mean().item()),
-        float((lambda_pred == labels).float().mean().item()),
-        float((1.0 / tau_ranks.float()).mean().item()),
-        float((1.0 / lambda_ranks.float()).mean().item()),
-    )
+    same_operator = _same_operator_matrix(op_id, op_params, threshold)
+
+    def recall_at(ranks: torch.Tensor, k: int) -> float:
+        return float((ranks <= min(k, energies.shape[0])).float().mean().item())
+
+    return {
+        "tau_to_lambda_acc": float((tau_pred == labels).float().mean().item()),
+        "lambda_to_tau_acc": float((lambda_pred == labels).float().mean().item()),
+        "exact_retrieval_accuracy_tau_to_lambda": float((tau_pred == labels).float().mean().item()),
+        "exact_retrieval_accuracy_lambda_to_tau": float((lambda_pred == labels).float().mean().item()),
+        "same_operator_retrieval_accuracy_tau_to_lambda": float(same_operator[labels, tau_pred].float().mean().item()),
+        "same_operator_retrieval_accuracy_lambda_to_tau": float(same_operator[lambda_pred, labels].float().mean().item()),
+        "mrr_tau_to_lambda": float((1.0 / tau_ranks.float()).mean().item()),
+        "mrr_lambda_to_tau": float((1.0 / lambda_ranks.float()).mean().item()),
+        "recall_at_1_tau_to_lambda": recall_at(tau_ranks, 1),
+        "recall_at_3_tau_to_lambda": recall_at(tau_ranks, 3),
+        "recall_at_5_tau_to_lambda": recall_at(tau_ranks, 5),
+        "recall_at_1_lambda_to_tau": recall_at(lambda_ranks, 1),
+        "recall_at_3_lambda_to_tau": recall_at(lambda_ranks, 3),
+        "recall_at_5_lambda_to_tau": recall_at(lambda_ranks, 5),
+    }
 
 
 def evaluate_occl_alignment_summary(
@@ -349,13 +370,14 @@ def evaluate_occl_alignment_summary(
     batch_size: int,
     device: torch.device,
     max_batches: int | None = None,
+    same_operator_threshold: float = 0.15,
 ) -> dict[str, float]:
     if not hasattr(model, "energy_matrix"):
         return {}
     loader = make_ranking_dataloader(dataset, batch_size=batch_size, shuffle=False)
-    tau_acc_sum = lambda_acc_sum = tau_mrr_sum = lambda_mrr_sum = 0.0
+    metric_sums: dict[str, float] = {}
     diag_sum = off_sum = 0.0
-    diag_count = off_count = batch_count = 0
+    diag_count = off_count = sample_count = batch_count = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
             if max_batches is not None and batch_idx >= max_batches:
@@ -365,32 +387,41 @@ def evaluate_occl_alignment_summary(
             if not isinstance(output, Mapping) or "lambda" not in output:
                 continue
             e_matrix = model.energy_matrix(batch["pos_states"], batch["pos_actions"], batch["pos_mask"], output["lambda"])
-            tau_acc, lambda_acc, tau_mrr, lambda_mrr = _mrr_from_energy_matrix(e_matrix)
+            batch_metrics = _occl_batch_metrics(
+                e_matrix,
+                batch["query_op_id"],
+                batch["query_op_params"],
+                same_operator_threshold,
+            )
             diag = e_matrix.diag()
             off_mask = ~torch.eye(e_matrix.shape[0], dtype=torch.bool, device=e_matrix.device)
             off = e_matrix[off_mask]
-            tau_acc_sum += tau_acc
-            lambda_acc_sum += lambda_acc
-            tau_mrr_sum += tau_mrr
-            lambda_mrr_sum += lambda_mrr
+            batch_size = int(e_matrix.shape[0])
+            for key, value in batch_metrics.items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + value * batch_size
             diag_sum += float(diag.sum().item())
             off_sum += float(off.sum().item())
             diag_count += int(diag.numel())
             off_count += int(off.numel())
+            sample_count += batch_size
             batch_count += 1
     if batch_count == 0:
         return {}
     diag_mean = diag_sum / max(1, diag_count)
     off_mean = off_sum / max(1, off_count)
-    return {
-        "tau_to_lambda_acc": tau_acc_sum / batch_count,
-        "lambda_to_tau_acc": lambda_acc_sum / batch_count,
-        "mrr_tau_to_lambda": tau_mrr_sum / batch_count,
-        "mrr_lambda_to_tau": lambda_mrr_sum / batch_count,
-        "diagonal_energy_mean": diag_mean,
-        "off_diagonal_energy_mean": off_mean,
-        "diagonal_vs_offdiag_gap": off_mean - diag_mean,
-    }
+    metrics = {key: value / max(1, sample_count) for key, value in metric_sums.items()}
+    metrics.update(
+        {
+            "diagonal_energy_mean": diag_mean,
+            "off_diagonal_energy_mean": off_mean,
+            "diagonal_vs_offdiag_gap": off_mean - diag_mean,
+            "num_alignment_samples": sample_count,
+            "same_operator_threshold": same_operator_threshold,
+        }
+    )
+    return metrics
+
+
 def _plot_ranking(metrics: Mapping[str, Any], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     by_type = metrics.get("by_negative_type", {})
@@ -469,6 +500,7 @@ def evaluate_run(
         bs,
         device,
         max_batches=eval_cfg.get("occl_alignment_batches"),
+        same_operator_threshold=ranking_cfg.min_law_param_distance,
     )
 
     summary = {

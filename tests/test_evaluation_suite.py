@@ -138,6 +138,9 @@ def test_evaluate_all_outputs_metrics_and_plots(tmp_path: Path) -> None:
 
     occl = evaluate_occl_alignment(run_dir, split="val", checkpoint_name="best_occl_acc.pt", device_name="cpu", num_samples=12, batch_size=4)
     assert "tau_to_lambda_acc" in occl
+    assert "same_operator_retrieval_accuracy_tau_to_lambda" in occl
+    assert "recall_at_3_tau_to_lambda" in occl
+    assert "diagonal_vs_offdiag_gap" in occl
     assert (eval_dir / "best_occl_acc" / "occl_alignment_metrics.json").exists()
     assert (eval_dir / "best_occl_acc" / "occl_energy_matrix.csv").exists()
     assert (eval_dir / "best_occl_acc" / "plots" / "occl_energy_matrix_heatmap.png").exists()

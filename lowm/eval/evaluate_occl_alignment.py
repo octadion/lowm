@@ -74,7 +74,13 @@ def evaluate_occl_alignment(
     dataset = LOWMSynthRankingDataset(split_path, ranking_cfg, num_samples=int(sample_count) if sample_count else None)
     bs = int(batch_size or config.get("training", {}).get("batch_size", 64))
 
-    metrics = evaluate_occl_alignment_summary(model, dataset, bs, device)
+    metrics = evaluate_occl_alignment_summary(
+        model,
+        dataset,
+        bs,
+        device,
+        same_operator_threshold=ranking_cfg.min_law_param_distance,
+    )
     metrics.update(
         {
             "model_type": detected,
@@ -138,6 +144,10 @@ def main() -> None:
             {
                 "tau_to_lambda_acc": metrics.get("tau_to_lambda_acc", 0.0),
                 "lambda_to_tau_acc": metrics.get("lambda_to_tau_acc", 0.0),
+                "same_operator_retrieval_accuracy_tau_to_lambda": metrics.get("same_operator_retrieval_accuracy_tau_to_lambda", 0.0),
+                "same_operator_retrieval_accuracy_lambda_to_tau": metrics.get("same_operator_retrieval_accuracy_lambda_to_tau", 0.0),
+                "recall_at_3_tau_to_lambda": metrics.get("recall_at_3_tau_to_lambda", 0.0),
+                "recall_at_3_lambda_to_tau": metrics.get("recall_at_3_lambda_to_tau", 0.0),
                 "diagonal_vs_offdiag_gap": metrics.get("diagonal_vs_offdiag_gap", 0.0),
             },
             indent=2,

@@ -241,3 +241,6 @@ def test_train_lowm_one_epoch(tmp_path: Path) -> None:
     assert (run_dir / "checkpoints" / "last.pt").exists()
     assert metrics["selection_metric"] == "law_pair"
     assert "occl_acc" in metrics["final_val"]
+    assert "occl_batch_mean_pairwise_op_param_distance" in metrics["final_val"]
+    assert "occl_batch_fraction_same_op_id" in metrics["final_val"]
+    assert "occl_batch_effective_unique_op_id" in metrics["final_val"]

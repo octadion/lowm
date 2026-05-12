@@ -120,9 +120,42 @@ def _occl_from_batch(
     return operator_coherence_contrastive_loss(e_matrix, temperature=temperature)
 
 
+def _operator_batch_stats(batch: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    op_id = batch["query_op_id"].detach()
+    params = batch["query_op_params"].detach()
+    batch_size = int(op_id.shape[0])
+    zero = torch.zeros((), device=op_id.device, dtype=params.dtype)
+    if batch_size < 2:
+        return {
+            "occl_batch_mean_pairwise_op_param_distance": zero,
+            "occl_batch_fraction_same_op_id": zero,
+            "occl_batch_effective_unique_op_id": torch.ones((), device=op_id.device, dtype=params.dtype),
+        }
+    idx_i, idx_j = torch.triu_indices(batch_size, batch_size, offset=1, device=op_id.device)
+    distances = torch.linalg.norm(params[idx_i] - params[idx_j], dim=-1)
+    same = (op_id[idx_i] == op_id[idx_j]).to(params.dtype)
+    unique_ids, counts = torch.unique(op_id, return_counts=True)
+    probs = counts.to(params.dtype) / counts.sum().to(params.dtype)
+    entropy = -(probs * torch.log(probs.clamp_min(1e-8))).sum()
+    return {
+        "occl_batch_mean_pairwise_op_param_distance": distances.mean(),
+        "occl_batch_fraction_same_op_id": same.mean(),
+        "occl_batch_effective_unique_op_id": torch.exp(entropy),
+    }
+
+
 def _add_occl_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     loss_terms = metrics.get("loss_terms", {})
-    for key in ["occl_loss", "tau_to_lambda_loss", "lambda_to_tau_loss", "occl_acc_tau_to_lambda", "occl_acc_lambda_to_tau"]:
+    for key in [
+        "occl_loss",
+        "tau_to_lambda_loss",
+        "lambda_to_tau_loss",
+        "occl_acc_tau_to_lambda",
+        "occl_acc_lambda_to_tau",
+        "occl_batch_mean_pairwise_op_param_distance",
+        "occl_batch_fraction_same_op_id",
+        "occl_batch_effective_unique_op_id",
+    ]:
         if key in loss_terms:
             metrics[key] = loss_terms[key]
     if "occl_acc_tau_to_lambda" in metrics and "occl_acc_lambda_to_tau" in metrics:
@@ -163,6 +196,7 @@ def evaluate_lowm(
             )
             if occl:
                 losses.update(occl)
+                losses.update(_operator_batch_stats(batch))
             batch_size = int(batch["labels"].shape[0])
             loss_acc.update(losses, batch_size)
             metrics_acc.update(output["energies"], batch["labels"], batch["negative_types"], float(losses["total"].item()))
@@ -208,6 +242,7 @@ def train_one_epoch(
         )
         if occl:
             losses.update(occl)
+            losses.update(_operator_batch_stats(batch))
         losses["total"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         optimizer.step()
@@ -232,7 +267,10 @@ def _format_lowm_metrics(metrics: Mapping[str, Any], prefix: str) -> str:
         f"{prefix}tau_to_lambda_loss={loss_terms.get('tau_to_lambda_loss', float('nan')):.4f} "
         f"{prefix}lambda_to_tau_loss={loss_terms.get('lambda_to_tau_loss', float('nan')):.4f} "
         f"{prefix}occl_acc_tau_to_lambda={loss_terms.get('occl_acc_tau_to_lambda', float('nan')):.4f} "
-        f"{prefix}occl_acc_lambda_to_tau={loss_terms.get('occl_acc_lambda_to_tau', float('nan')):.4f}"
+        f"{prefix}occl_acc_lambda_to_tau={loss_terms.get('occl_acc_lambda_to_tau', float('nan')):.4f} "
+        f"{prefix}occl_op_param_dist={loss_terms.get('occl_batch_mean_pairwise_op_param_distance', float('nan')):.4f} "
+        f"{prefix}occl_same_op_frac={loss_terms.get('occl_batch_fraction_same_op_id', float('nan')):.4f} "
+        f"{prefix}occl_effective_unique_op={loss_terms.get('occl_batch_effective_unique_op_id', float('nan')):.4f}"
     )
 
 

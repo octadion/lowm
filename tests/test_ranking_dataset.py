@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import torch
 import yaml
 
 from lowm.data.dataset import (
@@ -67,6 +68,17 @@ def test_dataloader_batch_shapes(tmp_path: Path) -> None:
     assert tuple(batch["cand_mask"].shape) == (4, 5, 5, 6)
     assert tuple(batch["labels"].shape) == (4,)
     assert len(batch["negative_types"]) == 4
+
+
+def test_distinct_operator_batch_sampler_spreads_ops_when_possible(tmp_path: Path) -> None:
+    path = _make_npz(tmp_path)
+    cfg = RankingConfig(K=3, H=4, M=5, seed=4, ensure_distinct_operators_in_batch=True)
+    dataset = LOWMSynthRankingDataset(path, cfg, num_samples=16)
+    loader = make_ranking_dataloader(dataset, batch_size=4, shuffle=True, ensure_distinct_operators_in_batch=True)
+    batch = next(iter(loader))
+
+    assert tuple(batch["pos_states"].shape) == (4, 5, 6, 7)
+    assert torch.unique(batch["query_op_id"]).numel() >= 2
 
 
 def test_negative_sampler_produces_all_required_types(tmp_path: Path) -> None:
