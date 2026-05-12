@@ -327,6 +327,70 @@ def evaluate_retrieval(model: torch.nn.Module, dataset: LOWMSynthRankingDataset,
     }
 
 
+def _mrr_from_energy_matrix(energies: torch.Tensor) -> tuple[float, float, float, float]:
+    labels = torch.arange(energies.shape[0], device=energies.device)
+    logits = -energies
+    tau_pred = torch.argmax(logits, dim=1)
+    lambda_pred = torch.argmax(logits.T, dim=1)
+    diag = energies.diag()
+    tau_ranks = (energies < diag[:, None]).sum(dim=1) + 1
+    lambda_ranks = (energies < diag[None, :]).sum(dim=0) + 1
+    return (
+        float((tau_pred == labels).float().mean().item()),
+        float((lambda_pred == labels).float().mean().item()),
+        float((1.0 / tau_ranks.float()).mean().item()),
+        float((1.0 / lambda_ranks.float()).mean().item()),
+    )
+
+
+def evaluate_occl_alignment_summary(
+    model: torch.nn.Module,
+    dataset: LOWMSynthRankingDataset,
+    batch_size: int,
+    device: torch.device,
+    max_batches: int | None = None,
+) -> dict[str, float]:
+    if not hasattr(model, "energy_matrix"):
+        return {}
+    loader = make_ranking_dataloader(dataset, batch_size=batch_size, shuffle=False)
+    tau_acc_sum = lambda_acc_sum = tau_mrr_sum = lambda_mrr_sum = 0.0
+    diag_sum = off_sum = 0.0
+    diag_count = off_count = batch_count = 0
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
+            batch = _move_batch_to_device(batch, device)
+            output = model(batch)
+            if not isinstance(output, Mapping) or "lambda" not in output:
+                continue
+            e_matrix = model.energy_matrix(batch["pos_states"], batch["pos_actions"], batch["pos_mask"], output["lambda"])
+            tau_acc, lambda_acc, tau_mrr, lambda_mrr = _mrr_from_energy_matrix(e_matrix)
+            diag = e_matrix.diag()
+            off_mask = ~torch.eye(e_matrix.shape[0], dtype=torch.bool, device=e_matrix.device)
+            off = e_matrix[off_mask]
+            tau_acc_sum += tau_acc
+            lambda_acc_sum += lambda_acc
+            tau_mrr_sum += tau_mrr
+            lambda_mrr_sum += lambda_mrr
+            diag_sum += float(diag.sum().item())
+            off_sum += float(off.sum().item())
+            diag_count += int(diag.numel())
+            off_count += int(off.numel())
+            batch_count += 1
+    if batch_count == 0:
+        return {}
+    diag_mean = diag_sum / max(1, diag_count)
+    off_mean = off_sum / max(1, off_count)
+    return {
+        "tau_to_lambda_acc": tau_acc_sum / batch_count,
+        "lambda_to_tau_acc": lambda_acc_sum / batch_count,
+        "mrr_tau_to_lambda": tau_mrr_sum / batch_count,
+        "mrr_lambda_to_tau": lambda_mrr_sum / batch_count,
+        "diagonal_energy_mean": diag_mean,
+        "off_diagonal_energy_mean": off_mean,
+        "diagonal_vs_offdiag_gap": off_mean - diag_mean,
+    }
 def _plot_ranking(metrics: Mapping[str, Any], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     by_type = metrics.get("by_negative_type", {})
@@ -399,6 +463,13 @@ def evaluate_run(
     )
     with (out_dir / "retrieval_metrics.json").open("w", encoding="utf-8") as f:
         json.dump(retrieval, f, indent=2, sort_keys=True)
+    occl_alignment = evaluate_occl_alignment_summary(
+        model,
+        dataset,
+        bs,
+        device,
+        max_batches=eval_cfg.get("occl_alignment_batches"),
+    )
 
     summary = {
         "model_type": detected,
@@ -412,6 +483,7 @@ def evaluate_run(
         "ranking": ranking,
         "disentanglement": disentanglement,
         "retrieval": retrieval,
+        "occl_alignment": occl_alignment,
     }
     with (out_dir / "eval_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)

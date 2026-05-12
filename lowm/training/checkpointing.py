@@ -9,7 +9,7 @@ from typing import Any, Mapping
 import torch
 
 
-SELECTION_METRICS = ("top1", "loss", "law_pair", "law_gap", "composite")
+SELECTION_METRICS = ("top1", "loss", "law_pair", "law_gap", "occl_acc", "composite")
 
 
 def metric_score(metrics: Mapping[str, Any], metric: str) -> float:
@@ -21,8 +21,19 @@ def metric_score(metrics: Mapping[str, Any], metric: str) -> float:
         return float(metrics.get("law_pair", metrics.get("law_mismatch", {}).get("pairwise_acc", 0.0)))
     if metric == "law_gap":
         return float(metrics.get("law_gap", metrics.get("law_mismatch", {}).get("mean_energy_gap", 0.0)))
+    if metric == "occl_acc":
+        return float(
+            metrics.get(
+                "occl_acc",
+                0.5
+                * (
+                    float(metrics.get("occl_acc_tau_to_lambda", 0.0))
+                    + float(metrics.get("occl_acc_lambda_to_tau", 0.0))
+                ),
+            )
+        )
     if metric == "composite":
-        return metric_score(metrics, "law_pair") + 0.1 * metric_score(metrics, "top1")
+        return metric_score(metrics, "law_pair") + 0.1 * metric_score(metrics, "top1") + 0.1 * metric_score(metrics, "occl_acc")
     raise ValueError(f"unknown selection metric '{metric}'")
 
 
@@ -58,6 +69,7 @@ class MultiMetricCheckpointer:
             "loss": float("-inf"),
             "law_pair": float("-inf"),
             "law_gap": float("-inf"),
+            "occl_acc": float("-inf"),
             "composite": float("-inf"),
         }
 

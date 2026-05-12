@@ -69,10 +69,12 @@ def collect_run(run_dir: Path, split: str | None = None, checkpoint: str | None 
         summary = _load_json(summary_path)
         ranking = summary["ranking"]
         retrieval = summary.get("retrieval", {})
+        occl = summary.get("occl_alignment", {})
         model_type = str(summary.get("model_type", run_dir.name))
     else:
         ranking = _load_json(eval_dir / "ranking_metrics.json")
         retrieval = _load_json(eval_dir / "retrieval_metrics.json") if (eval_dir / "retrieval_metrics.json").exists() else {}
+        occl = _load_json(eval_dir / "occl_alignment_metrics.json") if (eval_dir / "occl_alignment_metrics.json").exists() else {}
         model_type = run_dir.name
         summary = {"model_type": model_type, "checkpoint_used": checkpoint or ""}
     breakdown = _read_breakdown(eval_dir / "negative_type_breakdown.csv")
@@ -90,6 +92,9 @@ def collect_run(run_dir: Path, split: str | None = None, checkpoint: str | None 
         "law_gap": float(ranking.get("law_gap", ranking.get("law_mismatch", {}).get("mean_energy_gap", 0.0))),
         "retrieval_acc": float(retrieval.get("retrieval_acc", 0.0)),
         "retrieval_mrr": float(retrieval.get("mrr", 0.0)),
+        "occl_tau_to_lambda_acc": float(occl.get("tau_to_lambda_acc", 0.0)),
+        "occl_lambda_to_tau_acc": float(occl.get("lambda_to_tau_acc", 0.0)),
+        "occl_gap": float(occl.get("diagonal_vs_offdiag_gap", 0.0)),
         "breakdown": breakdown,
     }
     for name in REQUIRED_NEGATIVE_TYPES:
@@ -112,6 +117,9 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "law_gap",
         "retrieval_acc",
         "retrieval_mrr",
+        "occl_tau_to_lambda_acc",
+        "occl_lambda_to_tau_acc",
+        "occl_gap",
         *[f"{name}_pairwise_acc" for name in REQUIRED_NEGATIVE_TYPES],
         *[f"{name}_gap" for name in REQUIRED_NEGATIVE_TYPES],
         "run",
@@ -124,7 +132,7 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
 
 
 def _write_markdown(rows: list[dict[str, Any]], path: Path) -> None:
-    columns = ["model", "checkpoint", "top1_acc", "law_pair", "law_gap", "retrieval_acc", "mrr"]
+    columns = ["model", "checkpoint", "top1_acc", "law_pair", "law_gap", "occl_tau_to_lambda_acc", "occl_lambda_to_tau_acc", "retrieval_acc", "mrr"]
     lines = ["|" + "|".join(columns) + "|", "|" + "|".join(["---"] * len(columns)) + "|"]
     for row in rows:
         values = []

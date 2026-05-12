@@ -20,7 +20,7 @@ from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.metrics import RankingMetricAccumulator, format_metrics
 from lowm.models.lowm import LOWM, lowm_config_from_mapping
 from lowm.training.checkpointing import MultiMetricCheckpointer, checkpoint_payload
-from lowm.training.losses import law_stability_loss, lowm_total_loss
+from lowm.training.losses import law_stability_loss, lowm_total_loss, operator_coherence_contrastive_loss
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -107,6 +107,29 @@ def _stability_from_batch(model: LOWM, batch: Mapping[str, torch.Tensor], enable
     return law_stability_loss(mu_a, mu_b)
 
 
+def _occl_from_batch(
+    model: LOWM,
+    batch: Mapping[str, torch.Tensor],
+    lambdas: torch.Tensor,
+    enabled: bool,
+    temperature: float,
+) -> dict[str, torch.Tensor] | None:
+    if not enabled or batch["pos_states"].shape[0] < 2:
+        return None
+    e_matrix = model.energy_matrix(batch["pos_states"], batch["pos_actions"], batch["pos_mask"], lambdas)
+    return operator_coherence_contrastive_loss(e_matrix, temperature=temperature)
+
+
+def _add_occl_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    loss_terms = metrics.get("loss_terms", {})
+    for key in ["occl_loss", "tau_to_lambda_loss", "lambda_to_tau_loss", "occl_acc_tau_to_lambda", "occl_acc_lambda_to_tau"]:
+        if key in loss_terms:
+            metrics[key] = loss_terms[key]
+    if "occl_acc_tau_to_lambda" in metrics and "occl_acc_lambda_to_tau" in metrics:
+        metrics["occl_acc"] = 0.5 * (metrics["occl_acc_tau_to_lambda"] + metrics["occl_acc_lambda_to_tau"])
+    return metrics
+
+
 def evaluate_lowm(
     model: LOWM,
     loader,
@@ -114,6 +137,9 @@ def evaluate_lowm(
     beta_kl: float,
     alpha_stable: float,
     use_stability: bool,
+    alpha_occl: float = 0.0,
+    use_occl: bool = False,
+    occl_temperature: float = 1.0,
 ) -> dict[str, Any]:
     model.eval()
     metrics_acc = RankingMetricAccumulator()
@@ -123,6 +149,7 @@ def evaluate_lowm(
             batch = _move_batch_to_device(batch, device)
             output = model(batch)
             stability = _stability_from_batch(model, batch, use_stability)
+            occl = _occl_from_batch(model, batch, output["lambda"], use_occl, occl_temperature)
             losses = lowm_total_loss(
                 output["energies"],
                 batch["labels"],
@@ -131,13 +158,17 @@ def evaluate_lowm(
                 beta_kl=beta_kl,
                 stability=stability,
                 alpha_stable=alpha_stable,
+                occl_loss=occl["occl_loss"] if occl else None,
+                alpha_occl=alpha_occl,
             )
+            if occl:
+                losses.update(occl)
             batch_size = int(batch["labels"].shape[0])
             loss_acc.update(losses, batch_size)
             metrics_acc.update(output["energies"], batch["labels"], batch["negative_types"], float(losses["total"].item()))
     metrics = metrics_acc.compute()
     metrics["loss_terms"] = loss_acc.compute()
-    return metrics
+    return _add_occl_metrics(metrics)
 
 
 def train_one_epoch(
@@ -148,6 +179,9 @@ def train_one_epoch(
     beta_kl: float,
     alpha_stable: float,
     use_stability: bool,
+    alpha_occl: float = 0.0,
+    use_occl: bool = False,
+    occl_temperature: float = 1.0,
     max_steps: int | None = None,
 ) -> dict[str, Any]:
     model.train()
@@ -160,6 +194,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         output = model(batch)
         stability = _stability_from_batch(model, batch, use_stability)
+        occl = _occl_from_batch(model, batch, output["lambda"], use_occl, occl_temperature)
         losses = lowm_total_loss(
             output["energies"],
             batch["labels"],
@@ -168,7 +203,11 @@ def train_one_epoch(
             beta_kl=beta_kl,
             stability=stability,
             alpha_stable=alpha_stable,
+            occl_loss=occl["occl_loss"] if occl else None,
+            alpha_occl=alpha_occl,
         )
+        if occl:
+            losses.update(occl)
         losses["total"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         optimizer.step()
@@ -178,7 +217,7 @@ def train_one_epoch(
         metrics_acc.update(output["energies"].detach(), batch["labels"], batch["negative_types"], float(losses["total"].item()))
     metrics = metrics_acc.compute()
     metrics["loss_terms"] = loss_acc.compute()
-    return metrics
+    return _add_occl_metrics(metrics)
 
 
 def _format_lowm_metrics(metrics: Mapping[str, Any], prefix: str) -> str:
@@ -188,7 +227,12 @@ def _format_lowm_metrics(metrics: Mapping[str, Any], prefix: str) -> str:
         f"{prefix}total={loss_terms.get('total', float('nan')):.4f} "
         f"{prefix}nce={loss_terms.get('nce', float('nan')):.4f} "
         f"{prefix}kl={loss_terms.get('kl', float('nan')):.4f} "
-        f"{prefix}stable={loss_terms.get('stability', float('nan')):.4f}"
+        f"{prefix}stable={loss_terms.get('stability', float('nan')):.4f} "
+        f"{prefix}occl_loss={loss_terms.get('occl_loss', float('nan')):.4f} "
+        f"{prefix}tau_to_lambda_loss={loss_terms.get('tau_to_lambda_loss', float('nan')):.4f} "
+        f"{prefix}lambda_to_tau_loss={loss_terms.get('lambda_to_tau_loss', float('nan')):.4f} "
+        f"{prefix}occl_acc_tau_to_lambda={loss_terms.get('occl_acc_tau_to_lambda', float('nan')):.4f} "
+        f"{prefix}occl_acc_lambda_to_tau={loss_terms.get('occl_acc_lambda_to_tau', float('nan')):.4f}"
     )
 
 
@@ -220,8 +264,21 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
 
     batch_size = int(train_cfg.get("batch_size", 64))
     num_workers = int(train_cfg.get("num_workers", 0))
-    train_loader = make_ranking_dataloader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = make_ranking_dataloader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    ensure_distinct = bool(train_cfg.get("ensure_distinct_operators_in_batch", ranking_cfg.ensure_distinct_operators_in_batch))
+    train_loader = make_ranking_dataloader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        ensure_distinct_operators_in_batch=ensure_distinct,
+    )
+    val_loader = make_ranking_dataloader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        ensure_distinct_operators_in_batch=ensure_distinct,
+    )
 
     device_name = str(train_cfg.get("device", "auto"))
     device = torch.device("cuda" if device_name == "auto" and torch.cuda.is_available() else ("cpu" if device_name == "auto" else device_name))
@@ -235,6 +292,9 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
     beta_kl = float(train_cfg.get("beta_kl", 1e-4))
     alpha_stable = float(train_cfg.get("alpha_stable", 0.1))
     use_stability = bool(train_cfg.get("use_stability", True))
+    use_occl = bool(train_cfg.get("use_occl", False))
+    alpha_occl = float(train_cfg.get("alpha_occl", 1.0))
+    occl_temperature = float(train_cfg.get("occl_temperature", 1.0))
     selection_metric = str(train_cfg.get("selection_metric", "law_pair"))
 
     output_root = Path(train_cfg.get("output_dir", "runs/lowm_synth_v0"))
@@ -265,8 +325,30 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
     max_steps = int(max_steps) if max_steps is not None else None
     print(f"training LOWM on {device} -> {run_dir}")
     for epoch in range(1, epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device, beta_kl, alpha_stable, use_stability, max_steps)
-        val_metrics = evaluate_lowm(model, val_loader, device, beta_kl, alpha_stable, use_stability)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            beta_kl,
+            alpha_stable,
+            use_stability,
+            alpha_occl,
+            use_occl,
+            occl_temperature,
+            max_steps,
+        )
+        val_metrics = evaluate_lowm(
+            model,
+            val_loader,
+            device,
+            beta_kl,
+            alpha_stable,
+            use_stability,
+            alpha_occl,
+            use_occl,
+            occl_temperature,
+        )
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
         print(
             f"epoch {epoch:03d} {_format_lowm_metrics(train_metrics, 'train_')} | "

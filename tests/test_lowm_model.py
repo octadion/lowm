@@ -7,7 +7,7 @@ from lowm.data.dataset import LOWMSynthRankingDataset, RankingConfig, make_ranki
 from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.metrics import RankingMetricAccumulator
 from lowm.models.lowm import LOWM, LOWMConfig
-from lowm.training.losses import law_stability_loss, lowm_total_loss
+from lowm.training.losses import law_stability_loss, lowm_total_loss, operator_coherence_contrastive_loss
 from lowm.training.train_lowm import train_lowm
 
 
@@ -70,6 +70,55 @@ def test_lowm_backward_pass(tmp_path: Path) -> None:
         alpha_stable=0.1,
     )
     losses["total"].backward()
+    grad_norm = sum(float(p.grad.abs().sum().item()) for p in model.parameters() if p.grad is not None)
+    assert grad_norm > 0.0
+
+
+def test_lowm_energy_matrix_shape(tmp_path: Path) -> None:
+    batch, _ = _batch(tmp_path, batch_size=4)
+    model = LOWM(LOWMConfig(lambda_dim=8, hidden_dim=32, context_dim=32, use_mu_eval=True))
+    model.eval()
+    with torch.no_grad():
+        output = model(batch)
+        e_matrix = model.energy_matrix(batch["pos_states"], batch["pos_actions"], batch["pos_mask"], output["lambda"])
+    assert tuple(e_matrix.shape) == (4, 4)
+
+
+def test_occl_loss_finite_and_diagonal_accuracy() -> None:
+    e_matrix = torch.tensor([[0.0, 2.0, 3.0], [2.5, 0.1, 2.0], [4.0, 3.0, 0.2]])
+    out = operator_coherence_contrastive_loss(e_matrix)
+    assert torch.isfinite(out["occl_loss"])
+    assert out["occl_acc_tau_to_lambda"].item() == 1.0
+    assert out["occl_acc_lambda_to_tau"].item() == 1.0
+
+
+def test_occl_accuracy_random_energy_near_random() -> None:
+    torch.manual_seed(0)
+    e_matrix = torch.rand(32, 32)
+    out = operator_coherence_contrastive_loss(e_matrix)
+    assert 0.0 <= out["occl_acc_tau_to_lambda"].item() <= 0.25
+    assert 0.0 <= out["occl_acc_lambda_to_tau"].item() <= 0.25
+
+
+def test_lowm_occl_train_step_backpropagates(tmp_path: Path) -> None:
+    batch, _ = _batch(tmp_path, batch_size=4)
+    model = LOWM(LOWMConfig(lambda_dim=8, hidden_dim=32, context_dim=32))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer.zero_grad(set_to_none=True)
+    output = model(batch)
+    e_matrix = model.energy_matrix(batch["pos_states"], batch["pos_actions"], batch["pos_mask"], output["lambda"])
+    occl = operator_coherence_contrastive_loss(e_matrix)
+    losses = lowm_total_loss(
+        output["energies"],
+        batch["labels"],
+        output["mu"],
+        output["logvar"],
+        beta_kl=1e-4,
+        occl_loss=occl["occl_loss"],
+        alpha_occl=1.0,
+    )
+    losses["total"].backward()
+    optimizer.step()
     grad_norm = sum(float(p.grad.abs().sum().item()) for p in model.parameters() if p.grad is not None)
     assert grad_norm > 0.0
 
@@ -166,6 +215,10 @@ def test_train_lowm_one_epoch(tmp_path: Path) -> None:
             "beta_kl": 1e-4,
             "alpha_stable": 0.1,
             "use_stability": True,
+            "use_occl": True,
+            "alpha_occl": 1.0,
+            "occl_temperature": 1.0,
+            "ensure_distinct_operators_in_batch": True,
             "train_samples_per_epoch": 24,
             "val_samples": 16,
             "max_train_steps_per_epoch": 2,
@@ -184,5 +237,7 @@ def test_train_lowm_one_epoch(tmp_path: Path) -> None:
     assert (run_dir / "checkpoints" / "best_loss.pt").exists()
     assert (run_dir / "checkpoints" / "best_law_pair.pt").exists()
     assert (run_dir / "checkpoints" / "best_law_gap.pt").exists()
+    assert (run_dir / "checkpoints" / "best_occl_acc.pt").exists()
     assert (run_dir / "checkpoints" / "last.pt").exists()
     assert metrics["selection_metric"] == "law_pair"
+    assert "occl_acc" in metrics["final_val"]

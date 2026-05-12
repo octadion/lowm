@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import BatchSampler, DataLoader, Dataset
 
 from lowm.data.negatives import (
     Candidate,
@@ -29,6 +29,7 @@ class RankingConfig:
     seed: int = 123
     negative_types: tuple[str, ...] = REQUIRED_NEGATIVE_TYPES
     min_law_param_distance: float = 0.15
+    ensure_distinct_operators_in_batch: bool = False
 
 
 def ranking_config_from_mapping(config: Mapping[str, Any]) -> RankingConfig:
@@ -41,6 +42,14 @@ def ranking_config_from_mapping(config: Mapping[str, Any]) -> RankingConfig:
         seed=int(ranking.get("seed", RankingConfig.seed)),
         negative_types=tuple(str(x) for x in negative_types),
         min_law_param_distance=float(ranking.get("min_law_param_distance", RankingConfig.min_law_param_distance)),
+        ensure_distinct_operators_in_batch=bool(
+            ranking.get(
+                "ensure_distinct_operators_in_batch",
+                config.get("training", {}).get("ensure_distinct_operators_in_batch", RankingConfig.ensure_distinct_operators_in_batch)
+                if isinstance(config.get("training", {}), Mapping)
+                else RankingConfig.ensure_distinct_operators_in_batch,
+            )
+        ),
     )
 
 
@@ -122,6 +131,9 @@ class LOWMSynthRankingDataset(Dataset[dict[str, Any]]):
             "cand_states": torch.from_numpy(np.stack([c.states for c in shuffled]).astype(np.float32)),
             "cand_actions": torch.from_numpy(np.stack([c.actions for c in shuffled]).astype(np.float32)),
             "cand_mask": torch.from_numpy(np.stack([c.mask for c in shuffled]).astype(np.float32)),
+            "pos_states": torch.from_numpy(positive.states.astype(np.float32)),
+            "pos_actions": torch.from_numpy(positive.actions.astype(np.float32)),
+            "pos_mask": torch.from_numpy(positive.mask.astype(np.float32)),
             "labels": torch.tensor(label, dtype=torch.long),
             "negative_types": [c.candidate_type for c in shuffled],
             "is_positive": torch.tensor([c.is_positive for c in shuffled], dtype=torch.bool),
@@ -249,6 +261,9 @@ def ranking_collate(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "cand_states",
         "cand_actions",
         "cand_mask",
+        "pos_states",
+        "pos_actions",
+        "pos_mask",
         "labels",
         "is_positive",
         "candidate_op_id",
@@ -266,12 +281,62 @@ def ranking_collate(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+class DistinctOperatorBatchSampler(BatchSampler):
+    """Best-effort sampler that spreads different operator ids across a batch."""
+
+    def __init__(self, dataset: LOWMSynthRankingDataset, batch_size: int, shuffle: bool = True) -> None:
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.shuffle = shuffle
+        self.indices = list(range(len(dataset)))
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.dataset.cfg.seed)
+        indices = list(self.indices)
+        if self.shuffle:
+            rng.shuffle(indices)
+        buckets: dict[int, list[int]] = {}
+        for idx in indices:
+            ep = int(idx % self.dataset.num_episodes)
+            buckets.setdefault(int(self.dataset.op_id[ep]), []).append(idx)
+        op_ids = list(buckets)
+        if self.shuffle:
+            rng.shuffle(op_ids)
+
+        while any(buckets.values()):
+            batch: list[int] = []
+            while len(batch) < self.batch_size and any(buckets.values()):
+                round_ops = list(op_ids)
+                if self.shuffle:
+                    rng.shuffle(round_ops)
+                for op_id in round_ops:
+                    if len(batch) >= self.batch_size:
+                        break
+                    if buckets.get(op_id):
+                        batch.append(buckets[op_id].pop())
+            if not batch:
+                break
+            yield batch
+
+    def __len__(self) -> int:
+        return (len(self.dataset) + self.batch_size - 1) // self.batch_size
+
+
 def make_ranking_dataloader(
     dataset: LOWMSynthRankingDataset,
     batch_size: int,
     shuffle: bool = False,
     num_workers: int = 0,
+    ensure_distinct_operators_in_batch: bool | None = None,
 ) -> DataLoader[dict[str, Any]]:
+    ensure_distinct = dataset.cfg.ensure_distinct_operators_in_batch if ensure_distinct_operators_in_batch is None else ensure_distinct_operators_in_batch
+    if ensure_distinct:
+        return DataLoader(
+            dataset,
+            batch_sampler=DistinctOperatorBatchSampler(dataset, batch_size=batch_size, shuffle=shuffle),
+            num_workers=num_workers,
+            collate_fn=ranking_collate,
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,

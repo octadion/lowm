@@ -191,6 +191,33 @@ class LOWM(nn.Module):
     ) -> torch.Tensor:
         return self.energy_model(cand_states, cand_actions, cand_mask, lambda_sample)
 
+    def energy_matrix(
+        self,
+        pos_states: torch.Tensor,
+        pos_actions: torch.Tensor,
+        pos_mask: torch.Tensor,
+        lambdas: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pair each positive trajectory tau_i with each latent operator lambda_j.
+
+        Returns E[i, j] = E(tau_i, lambda_j).
+        """
+
+        if pos_states.ndim != 4:
+            raise ValueError(f"pos_states must be [B,H+1,N,D], got {tuple(pos_states.shape)}")
+        batch_size = pos_states.shape[0]
+        traj_states = pos_states[:, None].expand(batch_size, batch_size, *pos_states.shape[1:]).reshape(
+            batch_size * batch_size, 1, *pos_states.shape[1:]
+        )
+        traj_actions = pos_actions[:, None].expand(batch_size, batch_size, *pos_actions.shape[1:]).reshape(
+            batch_size * batch_size, 1, *pos_actions.shape[1:]
+        )
+        traj_mask = pos_mask[:, None].expand(batch_size, batch_size, *pos_mask.shape[1:]).reshape(
+            batch_size * batch_size, 1, *pos_mask.shape[1:]
+        )
+        paired_lambdas = lambdas[None, :, :].expand(batch_size, batch_size, -1).reshape(batch_size * batch_size, -1)
+        return self.energy(traj_states, traj_actions, traj_mask, paired_lambdas).reshape(batch_size, batch_size)
+
     def forward(self, batch: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         mu, logvar, lambda_sample = self.encode_lambda(
             batch["context_states"],

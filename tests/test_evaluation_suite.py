@@ -7,6 +7,7 @@ from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.aggregate_results import aggregate_results
 from lowm.eval.compare_train_eval_metrics import compare_train_eval_metrics
 from lowm.eval.evaluate_all import evaluate_run
+from lowm.eval.evaluate_occl_alignment import evaluate_occl_alignment
 from lowm.eval.evaluate_law_mismatch_only import evaluate_law_mismatch_only
 from lowm.eval.metrics import METRIC_VERSION
 from lowm.models.baselines import BaselineConfig, DirectContextEnergyModel, FixedEnergyModel
@@ -74,7 +75,7 @@ def _write_run(run_dir: Path, config: dict, model_type: str) -> None:
         checkpoint = {"model_state": model.state_dict(), "config": config, "baseline": "fixed_energy"}
         metadata = {"baseline": "fixed_energy"}
     torch.save(checkpoint, run_dir / "checkpoints" / "best.pt")
-    for name in ["best_top1.pt", "best_loss.pt", "best_law_pair.pt", "best_law_gap.pt", "last.pt"]:
+    for name in ["best_top1.pt", "best_loss.pt", "best_law_pair.pt", "best_law_gap.pt", "best_occl_acc.pt", "last.pt"]:
         torch.save(checkpoint, run_dir / "checkpoints" / name)
     import json
 
@@ -130,9 +131,16 @@ def test_evaluate_all_outputs_metrics_and_plots(tmp_path: Path) -> None:
     assert (eval_dir / "plots" / "disentanglement_heatmap.png").exists()
     assert (eval_dir / "plots" / "pairwise_accuracy_by_negative_type.png").exists()
     assert (eval_dir / "best_top1" / "ranking_metrics.json").exists()
+    assert "occl_alignment" in summary
 
     comparison = compare_train_eval_metrics(run_dir, split="val")
     assert "rows" in comparison
+
+    occl = evaluate_occl_alignment(run_dir, split="val", checkpoint_name="best_occl_acc.pt", device_name="cpu", num_samples=12, batch_size=4)
+    assert "tau_to_lambda_acc" in occl
+    assert (eval_dir / "best_occl_acc" / "occl_alignment_metrics.json").exists()
+    assert (eval_dir / "best_occl_acc" / "occl_energy_matrix.csv").exists()
+    assert (eval_dir / "best_occl_acc" / "plots" / "occl_energy_matrix_heatmap.png").exists()
 
     law_only = evaluate_law_mismatch_only(run_dir, split="val", checkpoint_name="best_law_pair.pt", device_name="cpu", num_samples=12, batch_size=4)
     assert "top1_law_only" in law_only

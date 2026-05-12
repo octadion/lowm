@@ -68,6 +68,7 @@ Training logs include NCE loss, ranking top-1 accuracy, mean rank, MRR, and law-
 
 ```bash
 python -m lowm.training.train_lowm --config configs/train_lowm.yaml
+python -m lowm.training.train_lowm --config configs/train_lowm_occl.yaml
 ```
 
 LOWM infers `q(lambda | C)` from context transitions, scores candidates with self and pairwise object-centric energy, and logs NCE/KL/stability terms plus validation ranking and law-mismatch metrics.
@@ -76,6 +77,7 @@ LOWM infers `q(lambda | C)` from context transitions, scores candidates with sel
 
 ```bash
 python -m lowm.eval.evaluate_all --run runs/lowm_synth_v0/lowm_seed0 --split val --checkpoint best.pt --num-samples 200 --seed 123
+python -m lowm.eval.evaluate_occl_alignment --run runs/lowm_synth_v0/lowm_occl_seed0 --split val --checkpoint best_occl_acc.pt
 python -m lowm.eval.evaluate_law_mismatch_only --run runs/lowm_synth_v0/lowm_seed0 --split val --checkpoint best_law_pair.pt
 python -m lowm.eval.compare_train_eval_metrics --run runs/lowm_synth_v0/lowm_seed0 --split val
 python -m lowm.eval.aggregate_results --runs runs/lowm_synth_v0/fixed_energy_seed0 runs/lowm_synth_v0/direct_context_energy_seed0 runs/lowm_synth_v0/lowm_seed0 --checkpoints best_top1.pt best_law_pair.pt last.pt --out runs/lowm_synth_v0/summary

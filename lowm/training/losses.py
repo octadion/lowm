@@ -44,9 +44,31 @@ def lowm_total_loss(
     beta_kl: float,
     stability: torch.Tensor | None = None,
     alpha_stable: float = 0.0,
+    occl_loss: torch.Tensor | None = None,
+    alpha_occl: float = 0.0,
 ) -> dict[str, torch.Tensor]:
     nce = nce_ranking_loss(energies, labels)
     kl = kl_standard_normal_loss(mu, logvar)
     stable = stability if stability is not None else torch.zeros((), device=energies.device, dtype=energies.dtype)
-    total = nce + float(beta_kl) * kl + float(alpha_stable) * stable
-    return {"total": total, "nce": nce, "kl": kl, "stability": stable}
+    occl = occl_loss if occl_loss is not None else torch.zeros((), device=energies.device, dtype=energies.dtype)
+    total = nce + float(alpha_occl) * occl + float(beta_kl) * kl + float(alpha_stable) * stable
+    return {"total": total, "nce": nce, "kl": kl, "stability": stable, "occl": occl}
+
+
+def operator_coherence_contrastive_loss(E_matrix: torch.Tensor, temperature: float = 1.0) -> dict[str, torch.Tensor]:
+    if E_matrix.ndim != 2 or E_matrix.shape[0] != E_matrix.shape[1]:
+        raise ValueError(f"E_matrix must have shape [B,B], got {tuple(E_matrix.shape)}")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    logits = -E_matrix / float(temperature)
+    labels = torch.arange(E_matrix.shape[0], device=E_matrix.device)
+    tau_to_lambda = F.cross_entropy(logits, labels)
+    lambda_to_tau = F.cross_entropy(logits.T, labels)
+    occl = 0.5 * (tau_to_lambda + lambda_to_tau)
+    return {
+        "occl_loss": occl,
+        "tau_to_lambda_loss": tau_to_lambda,
+        "lambda_to_tau_loss": lambda_to_tau,
+        "occl_acc_tau_to_lambda": (torch.argmax(logits, dim=1) == labels).float().mean(),
+        "occl_acc_lambda_to_tau": (torch.argmax(logits.T, dim=1) == labels).float().mean(),
+    }
