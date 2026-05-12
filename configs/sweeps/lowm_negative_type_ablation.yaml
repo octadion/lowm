@@ -1,0 +1,63 @@
+base_config: configs/train_lowm_occl.yaml
+sweep_dir: runs/lowm_synth_v0/lowm_negative_type_ablation
+
+variants:
+  - negative_set: all
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_types:
+      - state_corrupted
+      - temporal_shuffled
+      - law_mismatch
+      - random_impossible
+
+  - negative_set: no_law_mismatch
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_types:
+      - state_corrupted
+      - temporal_shuffled
+      - random_impossible
+
+  - negative_set: law_mismatch_only
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_types:
+      - law_mismatch
+
+  - negative_set: law_mismatch_temporal
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_types:
+      - law_mismatch
+      - temporal_shuffled
+
+evaluation:
+  enabled: true
+  split: val
+  ranking_checkpoint: best_law_pair.pt
+  law_checkpoint: best_law_pair.pt
+  occl_checkpoint: best_occl_acc.pt
+  num_samples: 1000
+  batch_size: 64
+  device: auto

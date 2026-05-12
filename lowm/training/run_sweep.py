@@ -24,7 +24,10 @@ SWEEP_TO_CONFIG_PATH = {
     "use_stability": ("training", "use_stability"),
     "beta_kl": ("training", "beta_kl"),
     "seed": ("training", "seed"),
+    "negative_types": ("ranking", "negative_types"),
+    "selection_metric": ("training", "selection_metric"),
 }
+METADATA_ONLY_PARAMS = {"negative_set", "name"}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -51,6 +54,13 @@ def _fmt_value(value: Any) -> str:
 
 
 def run_name_from_params(params: Mapping[str, Any]) -> str:
+    if params.get("negative_set"):
+        return (
+            f"lowm_negs_{_fmt_value(params['negative_set'])}"
+            f"_alpha{_fmt_value(params.get('alpha_occl', 1.0))}"
+            f"_lambda{_fmt_value(params.get('lambda_dim', 16))}"
+            f"_seed{_fmt_value(params.get('seed', 0))}"
+        )
     prefix = (
         f"lowm_occl_alpha{_fmt_value(params.get('alpha_occl', 1.0))}"
         f"_lambda{_fmt_value(params.get('lambda_dim', 16))}"
@@ -65,6 +75,11 @@ def run_name_from_params(params: Mapping[str, Any]) -> str:
 
 
 def expand_sweep(sweep: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if "variants" in sweep:
+        variants = sweep["variants"]
+        if not isinstance(variants, list) or not variants:
+            raise ValueError("variants must be a non-empty list")
+        return [dict(variant) for variant in variants]
     values = dict(sweep.get("parameters", {}))
     if not values:
         raise ValueError("sweep config must define parameters")
@@ -78,6 +93,8 @@ def expand_sweep(sweep: Mapping[str, Any]) -> list[dict[str, Any]]:
 def build_run_config(base_config: Mapping[str, Any], params: Mapping[str, Any], sweep_dir: Path) -> dict[str, Any]:
     config = deepcopy(dict(base_config))
     for key, value in params.items():
+        if key in METADATA_ONLY_PARAMS:
+            continue
         if key not in SWEEP_TO_CONFIG_PATH:
             raise ValueError(f"unsupported sweep parameter '{key}'")
         _set_nested(config, SWEEP_TO_CONFIG_PATH[key], value)

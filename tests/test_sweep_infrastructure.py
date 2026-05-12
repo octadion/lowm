@@ -34,6 +34,29 @@ def test_sweep_config_expansion_and_run_naming(tmp_path: Path) -> None:
     assert config["sweep_params"] == combos[-1]
 
 
+def test_variant_sweep_negative_types_config(tmp_path: Path) -> None:
+    sweep = {
+        "variants": [
+            {
+                "negative_set": "all",
+                "alpha_occl": 0.0,
+                "lambda_dim": 16,
+                "use_pairwise_energy": True,
+                "use_stability": True,
+                "beta_kl": 1e-4,
+                "seed": 0,
+                "negative_types": ["state_corrupted", "law_mismatch"],
+            }
+        ]
+    }
+    combos = expand_sweep(sweep)
+    assert len(combos) == 1
+    assert run_name_from_params(combos[0]).startswith("lowm_negs_all")
+    config = build_run_config({"ranking": {}, "model": {}, "training": {}}, combos[0], tmp_path / "sweep")
+    assert config["ranking"]["negative_types"] == ["state_corrupted", "law_mismatch"]
+    assert config["sweep_params"]["negative_set"] == "all"
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -51,6 +74,7 @@ def _write_dummy_run(sweep_dir: Path, name: str, params: dict) -> Path:
             "use_stability": params["use_stability"],
             "seed": params["seed"],
         },
+        "ranking": {"negative_types": params.get("negative_types", ["law_mismatch"])},
     }
     (run / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     eval_dir = run / "eval" / "val" / "best_law_pair"
@@ -93,6 +117,8 @@ def test_aggregate_sweep_outputs_csv_markdown_and_plots(tmp_path: Path) -> None:
             "use_stability": True,
             "beta_kl": 0.0,
             "seed": 0,
+            "negative_set": "all",
+            "negative_types": ["state_corrupted", "law_mismatch"],
         },
     )
     (sweep_dir / "manifest.json").write_text(json.dumps({"runs": [str(run)]}), encoding="utf-8")
@@ -100,7 +126,9 @@ def test_aggregate_sweep_outputs_csv_markdown_and_plots(tmp_path: Path) -> None:
     rows = aggregate_sweep(sweep_dir, out)
     assert len(rows) == 1
     assert rows[0]["law_only_top1"] == 0.6
+    assert rows[0]["negative_set"] == "all"
     assert (out / "ablation_summary.csv").exists()
     assert (out / "ablation_summary.md").exists()
     assert (out / "plots" / "law_only_top1_vs_alpha.png").exists()
     assert (out / "plots" / "lambda_dim_ablation.png").exists()
+    assert (out / "plots" / "negative_set_law_pair.png").exists()

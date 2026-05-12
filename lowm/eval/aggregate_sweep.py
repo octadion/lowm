@@ -78,6 +78,8 @@ def _sweep_params(run_dir: Path) -> dict[str, Any]:
     params.setdefault("use_stability", training.get("use_stability"))
     params.setdefault("beta_kl", training.get("beta_kl"))
     params.setdefault("seed", training.get("seed"))
+    params.setdefault("negative_set", params.get("name"))
+    params.setdefault("negative_types", config.get("ranking", {}).get("negative_types"))
     return params
 
 
@@ -128,6 +130,8 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "use_stability",
         "beta_kl",
         "seed",
+        "negative_set",
+        "negative_types",
         "top1_acc",
         "law_pair",
         "law_gap",
@@ -204,6 +208,11 @@ def write_sweep_plots(rows: list[dict[str, Any]], out_dir: Path) -> None:
     _line_plot(rows, "alpha_occl", "top1_acc", "Overall top1", plots / "top1_vs_alpha.png")
     _bar_plot(rows, "lambda_dim", "law_pair", "Law pair", plots / "lambda_dim_ablation.png")
     _bar_plot(rows, "use_pairwise_energy", "law_pair", "Law pair", plots / "pairwise_energy_ablation.png")
+    if any(row.get("negative_set") for row in rows):
+        _bar_plot(rows, "negative_set", "top1_acc", "Generic top1", plots / "negative_set_top1.png")
+        _bar_plot(rows, "negative_set", "law_only_top1", "Law-only top1", plots / "negative_set_law_only_top1.png")
+        _bar_plot(rows, "negative_set", "law_pair", "Law pair", plots / "negative_set_law_pair.png")
+        _bar_plot(rows, "negative_set", "law_gap", "Law gap", plots / "negative_set_law_gap.png")
 
 
 def aggregate_sweep(
