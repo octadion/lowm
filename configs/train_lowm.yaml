@@ -1,0 +1,48 @@
+seed: 0
+
+data:
+  root: data/lowm_synth_v0
+  train_split: train.npz
+  val_split: val.npz
+  generate_if_missing: true
+  dataset_config: configs/lowm_synth_v0.yaml
+
+ranking:
+  K: 8
+  H: 6
+  M: 5
+  seed: 123
+  min_law_param_distance: 0.15
+  negative_types:
+    - state_corrupted
+    - temporal_shuffled
+    - law_mismatch
+    - random_impossible
+
+model:
+  object_dim: 7
+  action_dim: 2
+  lambda_dim: 16
+  hidden_dim: 128
+  context_dim: 128
+  num_layers: 2
+  dropout: 0.0
+  use_pairwise_energy: true
+  use_mu_eval: true
+  energy_reduction: sum
+
+training:
+  seed: 0
+  output_dir: runs/lowm_synth_v0
+  run_name: lowm_seed0
+  device: auto
+  epochs: 10
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  beta_kl: 0.0001
+  alpha_stable: 0.1
+  use_stability: true
+  num_workers: 0
+  train_samples_per_epoch: 1000
+  val_samples: 200

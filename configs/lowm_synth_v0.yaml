@@ -1,0 +1,76 @@
+dataset: LOWM-Synth
+version: v0
+seed: 0
+
+simulation:
+  T: 20
+  world_size: 1.0
+  dt: 0.05
+  nmax: 6
+  max_speed: 5.0
+  wall_damping: 0.5
+
+objects:
+  radius_min: 0.025
+  radius_max: 0.055
+  mass_min: 0.5
+  mass_max: 2.0
+  velocity_min: -0.25
+  velocity_max: 0.25
+  num_types: 3
+
+actions:
+  impulse_prob: 0.15
+  force_min: -0.5
+  force_max: 0.5
+
+operators:
+  gravity: [-1.5, -0.3]
+  gravity_ood_low: [-1.5, -1.1]
+  gravity_ood_high: [-0.4, -0.2]
+  damping: [0.94, 1.0]
+  attraction_k: [-0.03, 0.03]
+  restitution: [0.2, 1.0]
+
+splits:
+  train:
+    num_episodes: 1000
+    n_min: 3
+    n_max: 5
+    parameter_split: iid
+    seed: 0
+  val:
+    num_episodes: 200
+    n_min: 3
+    n_max: 5
+    parameter_split: iid
+    seed: 1
+  test:
+    num_episodes: 500
+    n_min: 3
+    n_max: 5
+    parameter_split: iid
+    seed: 2
+  ood_gravity_low:
+    num_episodes: 500
+    n_min: 3
+    n_max: 5
+    parameter_split: ood_gravity_low
+    seed: 3
+  n_extrapolation:
+    num_episodes: 500
+    N: 6
+    parameter_split: iid
+    seed: 4
+
+ranking:
+  K: 8
+  H: 6
+  M: 5
+  seed: 123
+  min_law_param_distance: 0.15
+  negative_types:
+    - state_corrupted
+    - temporal_shuffled
+    - law_mismatch
+    - random_impossible
