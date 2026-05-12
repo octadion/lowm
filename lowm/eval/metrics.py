@@ -7,6 +7,14 @@ from typing import Any, Mapping
 
 import torch
 
+NEGATIVE_TYPE_ORDER = (
+    "state_corrupted",
+    "temporal_shuffled",
+    "law_mismatch",
+    "random_impossible",
+)
+METRIC_VERSION = "ranking_v2_pairwise_gap"
+
 
 def ranking_metrics_from_energies(energies: torch.Tensor, labels: torch.Tensor) -> dict[str, float]:
     if energies.ndim != 2:
@@ -100,6 +108,17 @@ class RankingMetricAccumulator:
             "law_mismatch",
             {"pairwise_acc": 0.0, "mean_energy_gap": 0.0, "count": 0, "top1_acc_on_samples_with_type": 0.0},
         )
+        metrics["law_pair"] = metrics["law_mismatch"]["pairwise_acc"]
+        metrics["law_gap"] = metrics["law_mismatch"]["mean_energy_gap"]
+        metrics["metric_version"] = METRIC_VERSION
+        for type_name in NEGATIVE_TYPE_ORDER:
+            values = by_type.get(
+                type_name,
+                {"pairwise_acc": 0.0, "mean_energy_gap": 0.0, "count": 0, "top1_acc_on_samples_with_type": 0.0},
+            )
+            metrics[f"{type_name}_pair_acc"] = values["pairwise_acc"]
+            metrics[f"{type_name}_gap"] = values["mean_energy_gap"]
+            metrics[f"{type_name}_count"] = values["count"]
         return metrics
 
 
@@ -110,10 +129,10 @@ def format_metrics(metrics: Mapping[str, Any], prefix: str = "") -> str:
         f"rank={metrics['mean_rank']:.2f} "
         f"mrr={metrics['mrr']:.3f}"
     )
-    law = metrics.get("law_mismatch", {})
-    if law:
-        base += (
-            f" law_pair={law.get('pairwise_acc', 0.0):.3f}"
-            f" law_gap={law.get('mean_energy_gap', 0.0):.3f}"
-        )
+    base += (
+        f" law_pair={metrics.get('law_pair', metrics.get('law_mismatch', {}).get('pairwise_acc', 0.0)):.3f}"
+        f" law_gap={metrics.get('law_gap', metrics.get('law_mismatch', {}).get('mean_energy_gap', 0.0)):.3f}"
+    )
+    for type_name in NEGATIVE_TYPE_ORDER:
+        base += f" {type_name}_pair_acc={metrics.get(f'{type_name}_pair_acc', 0.0):.3f}"
     return base

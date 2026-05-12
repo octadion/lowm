@@ -5,7 +5,10 @@ import yaml
 
 from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.aggregate_results import aggregate_results
+from lowm.eval.compare_train_eval_metrics import compare_train_eval_metrics
 from lowm.eval.evaluate_all import evaluate_run
+from lowm.eval.evaluate_law_mismatch_only import evaluate_law_mismatch_only
+from lowm.eval.metrics import METRIC_VERSION
 from lowm.models.baselines import BaselineConfig, DirectContextEnergyModel, FixedEnergyModel
 from lowm.models.lowm import LOWM, LOWMConfig
 
@@ -71,9 +74,38 @@ def _write_run(run_dir: Path, config: dict, model_type: str) -> None:
         checkpoint = {"model_state": model.state_dict(), "config": config, "baseline": "fixed_energy"}
         metadata = {"baseline": "fixed_energy"}
     torch.save(checkpoint, run_dir / "checkpoints" / "best.pt")
+    for name in ["best_top1.pt", "best_loss.pt", "best_law_pair.pt", "best_law_gap.pt", "last.pt"]:
+        torch.save(checkpoint, run_dir / "checkpoints" / name)
     import json
 
     (run_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    training_metrics = {
+        "history": [
+            {
+                "epoch": 1,
+                "val": {
+                    "metric_version": METRIC_VERSION,
+                    "top1_acc": 0.25,
+                    "mean_rank": 2.0,
+                    "mrr": 0.5,
+                    "law_pair": 0.5,
+                    "law_gap": 0.1,
+                    "law_mismatch_pair_acc": 0.5,
+                },
+            }
+        ],
+        "best_val_top1_acc": 0.25,
+        "final_val": {
+            "metric_version": METRIC_VERSION,
+            "top1_acc": 0.25,
+            "mean_rank": 2.0,
+            "mrr": 0.5,
+            "law_pair": 0.5,
+            "law_gap": 0.1,
+            "law_mismatch_pair_acc": 0.5,
+        },
+    }
+    (run_dir / "metrics.json").write_text(json.dumps(training_metrics), encoding="utf-8")
 
 
 def test_evaluate_all_outputs_metrics_and_plots(tmp_path: Path) -> None:
@@ -82,7 +114,7 @@ def test_evaluate_all_outputs_metrics_and_plots(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "lowm_seed5"
     _write_run(run_dir, config, "lowm")
 
-    summary = evaluate_run(run_dir, split="val", device_name="cpu", num_samples=12, batch_size=4)
+    summary = evaluate_run(run_dir, split="val", checkpoint_name="best_top1.pt", device_name="cpu", num_samples=12, batch_size=4)
     eval_dir = run_dir / "eval" / "val"
 
     assert summary["model_type"] == "lowm"
@@ -92,10 +124,20 @@ def test_evaluate_all_outputs_metrics_and_plots(tmp_path: Path) -> None:
     assert "retrieval_acc" in summary["retrieval"]
     assert (eval_dir / "ranking_metrics.json").exists()
     assert (eval_dir / "negative_type_breakdown.csv").exists()
+    assert (eval_dir / "debug_energies.csv").exists()
     assert (eval_dir / "disentanglement_matrix.csv").exists()
     assert (eval_dir / "retrieval_metrics.json").exists()
     assert (eval_dir / "plots" / "disentanglement_heatmap.png").exists()
     assert (eval_dir / "plots" / "pairwise_accuracy_by_negative_type.png").exists()
+    assert (eval_dir / "best_top1" / "ranking_metrics.json").exists()
+
+    comparison = compare_train_eval_metrics(run_dir, split="val")
+    assert "rows" in comparison
+
+    law_only = evaluate_law_mismatch_only(run_dir, split="val", checkpoint_name="best_law_pair.pt", device_name="cpu", num_samples=12, batch_size=4)
+    assert "top1_law_only" in law_only
+    assert "pairwise_acc_law_only" in law_only
+    assert (eval_dir / "law_mismatch_only_best_law_pair" / "law_mismatch_only_metrics.json").exists()
 
 
 def test_aggregate_results_outputs_tables_and_plots(tmp_path: Path) -> None:
@@ -106,12 +148,14 @@ def test_aggregate_results_outputs_tables_and_plots(tmp_path: Path) -> None:
     _write_run(lowm_run, config, "lowm")
     _write_run(fixed_run, config, "fixed_energy")
 
-    evaluate_run(lowm_run, split="val", device_name="cpu", num_samples=10, batch_size=5)
-    evaluate_run(fixed_run, split="val", device_name="cpu", num_samples=10, batch_size=5)
+    evaluate_run(lowm_run, split="val", checkpoint_name="best_top1.pt", device_name="cpu", num_samples=10, batch_size=5)
+    evaluate_run(lowm_run, split="val", checkpoint_name="last.pt", device_name="cpu", num_samples=10, batch_size=5)
+    evaluate_run(fixed_run, split="val", checkpoint_name="best_top1.pt", device_name="cpu", num_samples=10, batch_size=5)
 
     out = tmp_path / "summary"
-    rows = aggregate_results([fixed_run, lowm_run], out, split="val")
-    assert len(rows) == 2
+    rows = aggregate_results([fixed_run, lowm_run], out, split="val", checkpoints=["best_top1.pt", "last.pt"])
+    assert len(rows) == 3
+    assert any(row["checkpoint"] == "last" for row in rows)
     assert (out / "summary_table.csv").exists()
     assert (out / "summary_table.md").exists()
     assert (out / "ranking_bar_by_model.png").exists()

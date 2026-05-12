@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,10 +17,10 @@ import numpy as np
 import torch
 import yaml
 
-from lowm.data.dataset import LOWMSynthRankingDataset, make_ranking_dataloader, ranking_collate, ranking_config_from_mapping
+from lowm.data.dataset import LOWMSynthRankingDataset, make_ranking_dataloader, ranking_config_from_mapping
 from lowm.data.generate_dataset import generate_dataset
 from lowm.data.negatives import REQUIRED_NEGATIVE_TYPES, make_state_corrupted
-from lowm.eval.metrics import RankingMetricAccumulator
+from lowm.eval.metrics import METRIC_VERSION, RankingMetricAccumulator
 from lowm.models.baselines import baseline_config_from_mapping, build_baseline
 from lowm.models.lowm import LOWM, lowm_config_from_mapping
 from lowm.training.losses import nce_ranking_loss
@@ -77,12 +78,17 @@ def _detect_model_type(run_dir: Path, checkpoint: Mapping[str, Any], metadata: M
     raise ValueError("could not detect model type; pass --model_type")
 
 
-def load_run_model(run_dir: Path, model_type: str | None = None, checkpoint_name: str = "best.pt", device: torch.device | None = None) -> tuple[torch.nn.Module, dict[str, Any], str]:
+def _resolve_checkpoint_path(run_dir: Path, checkpoint_name: str) -> Path:
     ckpt_path = run_dir / "checkpoints" / checkpoint_name
     if not ckpt_path.exists():
         ckpt_path = run_dir / "checkpoints" / "last.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"missing checkpoint under {run_dir / 'checkpoints'}")
+    return ckpt_path
+
+
+def load_run_model(run_dir: Path, model_type: str | None = None, checkpoint_name: str = "best.pt", device: torch.device | None = None) -> tuple[torch.nn.Module, dict[str, Any], str]:
+    ckpt_path = _resolve_checkpoint_path(run_dir, checkpoint_name)
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     config = checkpoint.get("config")
     if not isinstance(config, dict):
@@ -115,19 +121,53 @@ def _ensure_split(config: Mapping[str, Any], split: str) -> Path:
     return split_path
 
 
-def evaluate_ranking(model: torch.nn.Module, dataset: LOWMSynthRankingDataset, batch_size: int, device: torch.device) -> dict[str, Any]:
+def _write_debug_energies(rows: list[dict[str, Any]], path: Path) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["sample_id", "candidate_id", "label", "negative_type", "energy", "is_positive"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def evaluate_ranking(
+    model: torch.nn.Module,
+    dataset: LOWMSynthRankingDataset,
+    batch_size: int,
+    device: torch.device,
+    debug_rows: int = 32,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     loader = make_ranking_dataloader(dataset, batch_size=batch_size, shuffle=False)
     acc = RankingMetricAccumulator()
+    debug: list[dict[str, Any]] = []
+    sample_offset = 0
     with torch.no_grad():
         for batch in loader:
             batch = _move_batch_to_device(batch, device)
             energies = _score_model(model, batch)
             loss = nce_ranking_loss(energies, batch["labels"])
             acc.update(energies, batch["labels"], batch["negative_types"], float(loss.item()))
+            energies_cpu = energies.detach().cpu()
+            labels_cpu = batch["labels"].detach().cpu()
+            if sample_offset < debug_rows:
+                for b in range(energies_cpu.shape[0]):
+                    sample_id = sample_offset + b
+                    if sample_id >= debug_rows:
+                        break
+                    label = int(labels_cpu[b].item())
+                    for cand_id in range(energies_cpu.shape[1]):
+                        neg_type = batch["negative_types"][b][cand_id]
+                        debug.append(
+                            {
+                                "sample_id": sample_id,
+                                "candidate_id": cand_id,
+                                "label": label,
+                                "negative_type": neg_type,
+                                "energy": float(energies_cpu[b, cand_id].item()),
+                                "is_positive": cand_id == label,
+                            }
+                        )
+            sample_offset += energies_cpu.shape[0]
     metrics = acc.compute()
-    metrics["law_pair"] = metrics["law_mismatch"]["pairwise_acc"]
-    metrics["law_gap"] = metrics["law_mismatch"]["mean_energy_gap"]
-    return metrics
+    return metrics, debug
 
 
 def _write_negative_breakdown(metrics: Mapping[str, Any], path: Path) -> None:
@@ -319,25 +359,32 @@ def evaluate_run(
     checkpoint_name: str = "best.pt",
     batch_size: int | None = None,
     num_samples: int | None = None,
+    seed: int | None = None,
     device_name: str = "auto",
 ) -> dict[str, Any]:
     device = torch.device("cuda" if device_name == "auto" and torch.cuda.is_available() else ("cpu" if device_name == "auto" else device_name))
+    checkpoint_path = _resolve_checkpoint_path(run_dir, checkpoint_name)
+    checkpoint_stem = checkpoint_path.stem
     model, config, detected = load_run_model(run_dir, model_type=model_type, checkpoint_name=checkpoint_name, device=device)
     split_path = _ensure_split(config, split)
     ranking_cfg = ranking_config_from_mapping(config)
+    if seed is not None:
+        ranking_cfg = replace(ranking_cfg, seed=int(seed))
     eval_cfg = dict(config.get("evaluation", {}))
     sample_count = num_samples if num_samples is not None else eval_cfg.get("num_samples", config.get("training", {}).get("val_samples"))
     dataset = LOWMSynthRankingDataset(split_path, ranking_cfg, num_samples=int(sample_count) if sample_count else None)
     bs = int(batch_size or config.get("training", {}).get("batch_size", 64))
 
-    out_dir = run_dir / "eval" / split
+    legacy_out_dir = run_dir / "eval" / split
+    out_dir = legacy_out_dir / checkpoint_stem
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    ranking = evaluate_ranking(model, dataset, bs, device)
+    ranking, debug = evaluate_ranking(model, dataset, bs, device, debug_rows=int(eval_cfg.get("debug_energy_samples", 32)))
     with (out_dir / "ranking_metrics.json").open("w", encoding="utf-8") as f:
         json.dump(ranking, f, indent=2, sort_keys=True)
     _write_negative_breakdown(ranking, out_dir / "negative_type_breakdown.csv")
+    _write_debug_energies(debug, out_dir / "debug_energies.csv")
     _plot_ranking(ranking, plots_dir)
 
     disentanglement = evaluate_disentanglement(model, dataset, device, max_samples=int(eval_cfg.get("disentanglement_samples", min(128, len(dataset)))))
@@ -353,9 +400,38 @@ def evaluate_run(
     with (out_dir / "retrieval_metrics.json").open("w", encoding="utf-8") as f:
         json.dump(retrieval, f, indent=2, sort_keys=True)
 
-    summary = {"model_type": detected, "split": split, "ranking": ranking, "disentanglement": disentanglement, "retrieval": retrieval}
+    summary = {
+        "model_type": detected,
+        "split": split,
+        "checkpoint_requested": checkpoint_name,
+        "checkpoint_used": checkpoint_path.name,
+        "checkpoint_stem": checkpoint_stem,
+        "ranking_seed": ranking_cfg.seed,
+        "num_samples": len(dataset),
+        "metric_version": METRIC_VERSION,
+        "ranking": ranking,
+        "disentanglement": disentanglement,
+        "retrieval": retrieval,
+    }
     with (out_dir / "eval_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)
+    legacy_out_dir.mkdir(parents=True, exist_ok=True)
+    for filename in [
+        "ranking_metrics.json",
+        "negative_type_breakdown.csv",
+        "debug_energies.csv",
+        "disentanglement_matrix.csv",
+        "retrieval_metrics.json",
+        "eval_summary.json",
+    ]:
+        source = out_dir / filename
+        if source.exists():
+            target = legacy_out_dir / filename
+            target.write_bytes(source.read_bytes())
+    legacy_plots = legacy_out_dir / "plots"
+    legacy_plots.mkdir(parents=True, exist_ok=True)
+    for source in plots_dir.glob("*.png"):
+        (legacy_plots / source.name).write_bytes(source.read_bytes())
     return summary
 
 
@@ -367,9 +443,10 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default="best.pt")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-samples", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
-    summary = evaluate_run(args.run, args.split, args.model_type, args.checkpoint, args.batch_size, args.num_samples, args.device)
+    summary = evaluate_run(args.run, args.split, args.model_type, args.checkpoint, args.batch_size, args.num_samples, args.seed, args.device)
     print(json.dumps({"model_type": summary["model_type"], "split": summary["split"], "top1_acc": summary["ranking"]["top1_acc"], "law_pair": summary["ranking"]["law_pair"], "law_gap": summary["ranking"]["law_gap"]}, indent=2))
 
 

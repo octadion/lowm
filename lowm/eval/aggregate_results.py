@@ -25,10 +25,12 @@ def _load_json(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _find_eval_dir(run_dir: Path, split: str | None) -> Path:
+def _find_eval_dir(run_dir: Path, split: str | None, checkpoint: str | None = None) -> Path:
     eval_root = run_dir / "eval"
     if split:
         path = eval_root / split
+        if checkpoint:
+            path = path / Path(checkpoint).stem
         if not path.exists():
             raise FileNotFoundError(f"missing eval directory {path}")
         return path
@@ -55,11 +57,13 @@ def _read_breakdown(path: Path) -> dict[str, dict[str, float]]:
 
 def _run_label(run_dir: Path, summary: dict[str, Any]) -> str:
     model = str(summary.get("model_type", run_dir.name))
-    return f"{model}:{run_dir.name}"
+    checkpoint = str(summary.get("checkpoint_stem", summary.get("checkpoint_used", ""))).replace(".pt", "")
+    suffix = f":{checkpoint}" if checkpoint else ""
+    return f"{model}:{run_dir.name}{suffix}"
 
 
-def collect_run(run_dir: Path, split: str | None = None) -> dict[str, Any]:
-    eval_dir = _find_eval_dir(run_dir, split)
+def collect_run(run_dir: Path, split: str | None = None, checkpoint: str | None = None) -> dict[str, Any]:
+    eval_dir = _find_eval_dir(run_dir, split, checkpoint)
     summary_path = eval_dir / "eval_summary.json"
     if summary_path.exists():
         summary = _load_json(summary_path)
@@ -70,13 +74,14 @@ def collect_run(run_dir: Path, split: str | None = None) -> dict[str, Any]:
         ranking = _load_json(eval_dir / "ranking_metrics.json")
         retrieval = _load_json(eval_dir / "retrieval_metrics.json") if (eval_dir / "retrieval_metrics.json").exists() else {}
         model_type = run_dir.name
-        summary = {"model_type": model_type}
+        summary = {"model_type": model_type, "checkpoint_used": checkpoint or ""}
     breakdown = _read_breakdown(eval_dir / "negative_type_breakdown.csv")
     row = {
         "run": str(run_dir),
         "model": model_type,
         "label": _run_label(run_dir, summary),
-        "split": eval_dir.name,
+        "split": str(summary.get("split", split or eval_dir.name)),
+        "checkpoint": str(summary.get("checkpoint_used", checkpoint or "")).replace(".pt", ""),
         "top1_acc": float(ranking.get("top1_acc", 0.0)),
         "mean_rank": float(ranking.get("mean_rank", 0.0)),
         "mrr": float(ranking.get("mrr", 0.0)),
@@ -96,6 +101,7 @@ def collect_run(run_dir: Path, split: str | None = None) -> dict[str, Any]:
 def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
     fieldnames = [
         "model",
+        "checkpoint",
         "label",
         "split",
         "top1_acc",
@@ -118,7 +124,7 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
 
 
 def _write_markdown(rows: list[dict[str, Any]], path: Path) -> None:
-    columns = ["model", "top1_acc", "law_pair", "law_gap", "retrieval_acc", "mrr"]
+    columns = ["model", "checkpoint", "top1_acc", "law_pair", "law_gap", "retrieval_acc", "mrr"]
     lines = ["|" + "|".join(columns) + "|", "|" + "|".join(["---"] * len(columns)) + "|"]
     for row in rows:
         values = []
@@ -161,9 +167,18 @@ def _grouped_negative_plot(rows: list[dict[str, Any]], path: Path) -> None:
     plt.close(fig)
 
 
-def aggregate_results(run_dirs: list[Path], out_dir: Path, split: str | None = None) -> list[dict[str, Any]]:
+def aggregate_results(run_dirs: list[Path], out_dir: Path, split: str | None = None, checkpoints: list[str] | None = None) -> list[dict[str, Any]]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = [collect_run(run_dir, split) for run_dir in run_dirs]
+    rows: list[dict[str, Any]] = []
+    if checkpoints:
+        for run_dir in run_dirs:
+            for checkpoint in checkpoints:
+                try:
+                    rows.append(collect_run(run_dir, split, checkpoint))
+                except FileNotFoundError:
+                    continue
+    else:
+        rows = [collect_run(run_dir, split) for run_dir in run_dirs]
     _write_csv(rows, out_dir / "summary_table.csv")
     _write_markdown(rows, out_dir / "summary_table.md")
     _bar_plot(rows, "top1_acc", "Overall top-1", out_dir / "ranking_bar_by_model.png")
@@ -191,8 +206,9 @@ def main() -> None:
     parser.add_argument("--runs", type=Path, nargs="+", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--split", type=str, default=None)
+    parser.add_argument("--checkpoints", type=str, nargs="*", default=None)
     args = parser.parse_args()
-    rows = aggregate_results(args.runs, args.out, args.split)
+    rows = aggregate_results(args.runs, args.out, args.split, args.checkpoints)
     print(f"aggregated {len(rows)} runs into {args.out}")
 
 

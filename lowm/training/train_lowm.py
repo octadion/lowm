@@ -19,6 +19,7 @@ from lowm.data.dataset import LOWMSynthRankingDataset, make_ranking_dataloader, 
 from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.metrics import RankingMetricAccumulator, format_metrics
 from lowm.models.lowm import LOWM, lowm_config_from_mapping
+from lowm.training.checkpointing import MultiMetricCheckpointer, checkpoint_payload
 from lowm.training.losses import law_stability_loss, lowm_total_loss
 
 
@@ -191,6 +192,19 @@ def _format_lowm_metrics(metrics: Mapping[str, Any], prefix: str) -> str:
     )
 
 
+def _print_validation_metrics(metrics: Mapping[str, Any]) -> str:
+    return (
+        f"val_top1={metrics.get('top1_acc', 0.0):.4f} "
+        f"val_loss={metrics.get('loss', float('nan')):.4f} "
+        f"val_law_pair={metrics.get('law_pair', 0.0):.4f} "
+        f"val_law_gap={metrics.get('law_gap', 0.0):.4f} "
+        f"val_state_corrupted_pair={metrics.get('state_corrupted_pair_acc', 0.0):.4f} "
+        f"val_temporal_shuffled_pair={metrics.get('temporal_shuffled_pair_acc', 0.0):.4f} "
+        f"val_law_mismatch_pair={metrics.get('law_mismatch_pair_acc', 0.0):.4f} "
+        f"val_random_impossible_pair={metrics.get('random_impossible_pair_acc', 0.0):.4f}"
+    )
+
+
 def train_lowm(config_path: Path) -> dict[str, Any]:
     config = _load_yaml(config_path)
     train_cfg = dict(config.get("training", {}))
@@ -221,6 +235,7 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
     beta_kl = float(train_cfg.get("beta_kl", 1e-4))
     alpha_stable = float(train_cfg.get("alpha_stable", 0.1))
     use_stability = bool(train_cfg.get("use_stability", True))
+    selection_metric = str(train_cfg.get("selection_metric", "law_pair"))
 
     output_root = Path(train_cfg.get("output_dir", "runs/lowm_synth_v0"))
     run_name = str(train_cfg.get("run_name", f"lowm_seed{seed}"))
@@ -244,7 +259,7 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
         )
 
     history: list[dict[str, Any]] = []
-    best_val = -1.0
+    checkpointer = MultiMetricCheckpointer(checkpoints, selection_metric=selection_metric)
     epochs = int(train_cfg.get("epochs", 10))
     max_steps = train_cfg.get("max_train_steps_per_epoch")
     max_steps = int(max_steps) if max_steps is not None else None
@@ -253,30 +268,19 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
         train_metrics = train_one_epoch(model, train_loader, optimizer, device, beta_kl, alpha_stable, use_stability, max_steps)
         val_metrics = evaluate_lowm(model, val_loader, device, beta_kl, alpha_stable, use_stability)
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
-        print(f"epoch {epoch:03d} {_format_lowm_metrics(train_metrics, 'train_')} | {_format_lowm_metrics(val_metrics, 'val_')}")
-
-        if float(val_metrics["top1_acc"]) >= best_val:
-            best_val = float(val_metrics["top1_acc"])
-            torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "config": config,
-                    "epoch": epoch,
-                    "val_metrics": val_metrics,
-                },
-                checkpoints / "best.pt",
-            )
-        torch.save(
-            {
-                "model_state": model.state_dict(),
-                "config": config,
-                "epoch": epoch,
-                "val_metrics": val_metrics,
-            },
-            checkpoints / "last.pt",
+        print(
+            f"epoch {epoch:03d} {_format_lowm_metrics(train_metrics, 'train_')} | "
+            f"{_format_lowm_metrics(val_metrics, 'val_')} | {_print_validation_metrics(val_metrics)}"
         )
+        payload = checkpoint_payload(model, config, epoch, val_metrics, "lowm")
+        checkpointer.update(payload, val_metrics)
 
-    metrics = {"history": history, "best_val_top1_acc": best_val, "final_val": history[-1]["val"] if history else {}}
+    metrics = {
+        "history": history,
+        "best_scores": checkpointer.best_scores,
+        "selection_metric": selection_metric,
+        "final_val": history[-1]["val"] if history else {},
+    }
     with (run_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
     return metrics

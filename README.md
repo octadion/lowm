@@ -75,11 +75,14 @@ LOWM infers `q(lambda | C)` from context transitions, scores candidates with sel
 ## Evaluate And Aggregate
 
 ```bash
-python -m lowm.eval.evaluate_all --run runs/lowm_synth_v0/lowm_seed0 --split val
-python -m lowm.eval.aggregate_results --runs runs/lowm_synth_v0/fixed_energy_seed0 runs/lowm_synth_v0/direct_context_energy_seed0 runs/lowm_synth_v0/lowm_seed0 --out runs/lowm_synth_v0/summary
+python -m lowm.eval.evaluate_all --run runs/lowm_synth_v0/lowm_seed0 --split val --checkpoint best.pt --num-samples 200 --seed 123
+python -m lowm.eval.evaluate_law_mismatch_only --run runs/lowm_synth_v0/lowm_seed0 --split val --checkpoint best_law_pair.pt
+python -m lowm.eval.compare_train_eval_metrics --run runs/lowm_synth_v0/lowm_seed0 --split val
+python -m lowm.eval.aggregate_results --runs runs/lowm_synth_v0/fixed_energy_seed0 runs/lowm_synth_v0/direct_context_energy_seed0 runs/lowm_synth_v0/lowm_seed0 --checkpoints best_top1.pt best_law_pair.pt last.pt --out runs/lowm_synth_v0/summary
 ```
 
-Evaluation writes ranking metrics, negative-type breakdowns, state-vs-law energy matrices, retrieval metrics, and plots under `<run>/eval/<split>/`.
+Evaluation writes ranking metrics, negative-type breakdowns, `debug_energies.csv`, state-vs-law energy matrices, retrieval metrics, and plots under `<run>/eval/<split>/`.
+LOWM training saves `best_top1.pt`, `best_loss.pt`, `best_law_pair.pt`, `best_law_gap.pt`, `last.pt`, and keeps `best.pt` as a `best_top1.pt` alias.
 
 ## Stored Arrays
 

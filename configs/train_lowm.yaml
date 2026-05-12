@@ -43,6 +43,7 @@ training:
   beta_kl: 0.0001
   alpha_stable: 0.1
   use_stability: true
+  selection_metric: law_pair
   num_workers: 0
   train_samples_per_epoch: 1000
   val_samples: 200

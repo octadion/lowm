@@ -18,6 +18,7 @@ from lowm.data.dataset import LOWMSynthRankingDataset, make_ranking_dataloader, 
 from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.metrics import RankingMetricAccumulator, format_metrics
 from lowm.models.baselines import baseline_config_from_mapping, build_baseline
+from lowm.training.checkpointing import MultiMetricCheckpointer, checkpoint_payload
 from lowm.training.losses import nce_ranking_loss
 
 
@@ -163,7 +164,7 @@ def train_baseline(config_path: Path, baseline: str | None = None) -> dict[str, 
         json.dump(metadata, f, indent=2, sort_keys=True)
 
     history: list[dict[str, Any]] = []
-    best_val = -1.0
+    checkpointer = MultiMetricCheckpointer(checkpoints, selection_metric=str(train_cfg.get("selection_metric", "top1")))
     epochs = int(train_cfg.get("epochs", 10))
     max_steps = train_cfg.get("max_train_steps_per_epoch")
     max_steps = int(max_steps) if max_steps is not None else None
@@ -175,31 +176,22 @@ def train_baseline(config_path: Path, baseline: str | None = None) -> dict[str, 
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         history.append(record)
         print(f"epoch {epoch:03d} {format_metrics(train_metrics, 'train_')} | {format_metrics(val_metrics, 'val_')}")
-
-        if float(val_metrics["top1_acc"]) >= best_val:
-            best_val = float(val_metrics["top1_acc"])
-            torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "baseline": baseline_name,
-                    "config": config,
-                    "epoch": epoch,
-                    "val_metrics": val_metrics,
-                },
-                checkpoints / "best.pt",
-            )
-        torch.save(
-            {
-                "model_state": model.state_dict(),
-                "baseline": baseline_name,
-                "config": config,
-                "epoch": epoch,
-                "val_metrics": val_metrics,
-            },
-            checkpoints / "last.pt",
+        payload = checkpoint_payload(
+            model,
+            config,
+            epoch,
+            val_metrics,
+            baseline_name,
+            extra={"baseline": baseline_name},
         )
+        checkpointer.update(payload, val_metrics)
 
-    metrics = {"history": history, "best_val_top1_acc": best_val, "final_val": history[-1]["val"] if history else {}}
+    metrics = {
+        "history": history,
+        "best_scores": checkpointer.best_scores,
+        "selection_metric": checkpointer.selection_metric,
+        "final_val": history[-1]["val"] if history else {},
+    }
     with (run_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
     return metrics

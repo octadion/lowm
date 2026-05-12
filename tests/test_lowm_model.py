@@ -180,3 +180,9 @@ def test_train_lowm_one_epoch(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "lowm_test_seed3"
     assert (run_dir / "metrics.json").exists()
     assert (run_dir / "checkpoints" / "best.pt").exists()
+    assert (run_dir / "checkpoints" / "best_top1.pt").exists()
+    assert (run_dir / "checkpoints" / "best_loss.pt").exists()
+    assert (run_dir / "checkpoints" / "best_law_pair.pt").exists()
+    assert (run_dir / "checkpoints" / "best_law_gap.pt").exists()
+    assert (run_dir / "checkpoints" / "last.pt").exists()
+    assert metrics["selection_metric"] == "law_pair"

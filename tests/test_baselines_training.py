@@ -60,6 +60,10 @@ def test_ranking_metric_accumulator_law_breakdown() -> None:
     metrics = acc.compute()
     assert metrics["top1_acc"] == 0.5
     assert metrics["law_mismatch"]["pairwise_acc"] == 0.5
+    assert metrics["law_pair"] == 0.5
+    assert abs(metrics["law_gap"] - 0.1) < 1e-6
+    assert metrics["law_mismatch_pair_acc"] == 0.5
+    assert abs(metrics["law_mismatch_gap"] - 0.1) < 1e-6
     assert metrics["by_negative_type"]["state_corrupted"]["count"] == 1
 
 
