@@ -72,6 +72,15 @@ python -m lowm.training.train_lowm --config configs/train_lowm.yaml
 
 LOWM infers `q(lambda | C)` from context transitions, scores candidates with self and pairwise object-centric energy, and logs NCE/KL/stability terms plus validation ranking and law-mismatch metrics.
 
+## Evaluate And Aggregate
+
+```bash
+python -m lowm.eval.evaluate_all --run runs/lowm_synth_v0/lowm_seed0 --split val
+python -m lowm.eval.aggregate_results --runs runs/lowm_synth_v0/fixed_energy_seed0 runs/lowm_synth_v0/direct_context_energy_seed0 runs/lowm_synth_v0/lowm_seed0 --out runs/lowm_synth_v0/summary
+```
+
+Evaluation writes ranking metrics, negative-type breakdowns, state-vs-law energy matrices, retrieval metrics, and plots under `<run>/eval/<split>/`.
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:
