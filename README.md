@@ -86,6 +86,15 @@ python -m lowm.eval.aggregate_results --runs runs/lowm_synth_v0/fixed_energy_see
 Evaluation writes ranking metrics, negative-type breakdowns, `debug_energies.csv`, state-vs-law energy matrices, retrieval metrics, and plots under `<run>/eval/<split>/`.
 LOWM training saves `best_top1.pt`, `best_loss.pt`, `best_law_pair.pt`, `best_law_gap.pt`, `last.pt`, and keeps `best.pt` as a `best_top1.pt` alias.
 
+## Run Ablation Sweep
+
+```bash
+python -m lowm.training.run_sweep --config configs/sweeps/lowm_occl_ablation.yaml
+python -m lowm.eval.aggregate_sweep --sweep_dir runs/lowm_synth_v0/lowm_occl_ablation --out runs/lowm_synth_v0/lowm_occl_ablation/summary
+```
+
+The sweep runner writes generated configs, trains each LOWM-OCCL ablation, evaluates ranking/law-only/OCCL alignment, and the sweep aggregator produces ablation CSV/Markdown tables plus plots.
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:
