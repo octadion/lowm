@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 
 from lowm.eval.aggregate_sweep import aggregate_sweep
-from lowm.training.run_sweep import build_run_config, expand_sweep, run_name_from_params
+from lowm.training.run_sweep import build_run_config, expand_sweep, run_name_from_params, run_sweep
 
 
 def test_sweep_config_expansion_and_run_naming(tmp_path: Path) -> None:
@@ -55,6 +55,56 @@ def test_variant_sweep_negative_types_config(tmp_path: Path) -> None:
     config = build_run_config({"ranking": {}, "model": {}, "training": {}}, combos[0], tmp_path / "sweep")
     assert config["ranking"]["negative_types"] == ["state_corrupted", "law_mismatch"]
     assert config["sweep_params"]["negative_set"] == "all"
+
+
+def test_component_sweep_dry_run_generates_eight_configs(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "data": {"root": "data/lowm_synth_v0"},
+                "ranking": {"negative_types": ["law_mismatch"]},
+                "model": {"lambda_dim": 16, "use_pairwise_energy": True},
+                "training": {"alpha_occl": 1.0, "beta_kl": 1e-4, "seed": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    variants = []
+    for name in ["main_all", "no_pairwise", "no_stability", "lambda_dim_4", "lambda_dim_8", "lambda_dim_32", "no_kl", "high_kl"]:
+        variants.append(
+            {
+                "component": name,
+                "alpha_occl": 0.0,
+                "lambda_dim": 4 if name == "lambda_dim_4" else 8 if name == "lambda_dim_8" else 32 if name == "lambda_dim_32" else 16,
+                "use_pairwise_energy": name != "no_pairwise",
+                "use_stability": name != "no_stability",
+                "beta_kl": 0.0 if name == "no_kl" else 1e-3 if name == "high_kl" else 1e-4,
+                "seed": 0,
+                "negative_set": "all",
+                "negative_types": ["state_corrupted", "temporal_shuffled", "law_mismatch", "random_impossible"],
+            }
+        )
+    sweep = tmp_path / "component.yaml"
+    sweep.write_text(
+        yaml.safe_dump(
+            {
+                "base_config": str(base),
+                "sweep_dir": str(tmp_path / "component_sweep"),
+                "variants": variants,
+                "overrides": {"training": {"epochs": 30, "train_samples_per_epoch": 5000, "val_samples": 1000}},
+                "evaluation": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runs = run_sweep(sweep, dry_run=True)
+    assert len(runs) == 8
+    generated = sorted((tmp_path / "component_sweep" / "configs").glob("*.yaml"))
+    assert len(generated) == 8
+    one = yaml.safe_load(generated[0].read_text(encoding="utf-8"))
+    assert one["training"]["epochs"] == 30
+    assert one["training"]["train_samples_per_epoch"] == 5000
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -118,6 +168,7 @@ def test_aggregate_sweep_outputs_csv_markdown_and_plots(tmp_path: Path) -> None:
             "beta_kl": 0.0,
             "seed": 0,
             "negative_set": "all",
+            "component": "main_all",
             "negative_types": ["state_corrupted", "law_mismatch"],
         },
     )
@@ -127,8 +178,12 @@ def test_aggregate_sweep_outputs_csv_markdown_and_plots(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["law_only_top1"] == 0.6
     assert rows[0]["negative_set"] == "all"
+    assert rows[0]["component"] == "main_all"
     assert (out / "ablation_summary.csv").exists()
     assert (out / "ablation_summary.md").exists()
     assert (out / "plots" / "law_only_top1_vs_alpha.png").exists()
     assert (out / "plots" / "lambda_dim_ablation.png").exists()
     assert (out / "plots" / "negative_set_law_pair.png").exists()
+    assert (out / "plots" / "component_ablation_law_pair.png").exists()
+    assert (out / "plots" / "component_ablation_law_gap.png").exists()
+    assert (out / "plots" / "component_ablation_law_only_top1.png").exists()

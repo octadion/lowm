@@ -95,6 +95,13 @@ python -m lowm.eval.aggregate_sweep --sweep_dir runs/lowm_synth_v0/lowm_occl_abl
 
 The sweep runner writes generated configs, trains each LOWM-OCCL ablation, evaluates ranking/law-only/OCCL alignment, and the sweep aggregator produces ablation CSV/Markdown tables plus plots.
 
+Component ablations:
+
+```bash
+python -m lowm.training.run_sweep --config configs/sweeps/lowm_component_ablation.yaml
+python -m lowm.eval.aggregate_sweep --sweep_dir runs/lowm_synth_v0/lowm_component_ablation --out runs/lowm_synth_v0/lowm_component_ablation/summary
+```
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:

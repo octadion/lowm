@@ -1,0 +1,111 @@
+base_config: configs/train_lowm_occl.yaml
+sweep_dir: runs/lowm_synth_v0/lowm_component_ablation
+
+variants:
+  - component: main_all
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: &all_negatives
+      - state_corrupted
+      - temporal_shuffled
+      - law_mismatch
+      - random_impossible
+
+  - component: no_pairwise
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: false
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+  - component: no_stability
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: false
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+  - component: lambda_dim_4
+    alpha_occl: 0.0
+    lambda_dim: 4
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+  - component: lambda_dim_8
+    alpha_occl: 0.0
+    lambda_dim: 8
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+  - component: lambda_dim_32
+    alpha_occl: 0.0
+    lambda_dim: 32
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-4
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+  - component: no_kl
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 0.0
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+  - component: high_kl
+    alpha_occl: 0.0
+    lambda_dim: 16
+    use_pairwise_energy: true
+    use_stability: true
+    beta_kl: 1.0e-3
+    seed: 0
+    selection_metric: law_pair
+    negative_set: all
+    negative_types: *all_negatives
+
+overrides:
+  training:
+    epochs: 30
+    train_samples_per_epoch: 5000
+    val_samples: 1000
+
+evaluation:
+  enabled: true
+  split: val
+  ranking_checkpoint: best_law_pair.pt
+  law_checkpoint: best_law_pair.pt
+  occl_checkpoint: best_occl_acc.pt
+  num_samples: 1000
+  batch_size: 64
+  device: auto

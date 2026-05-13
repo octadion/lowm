@@ -27,7 +27,7 @@ SWEEP_TO_CONFIG_PATH = {
     "negative_types": ("ranking", "negative_types"),
     "selection_metric": ("training", "selection_metric"),
 }
-METADATA_ONLY_PARAMS = {"negative_set", "name"}
+METADATA_ONLY_PARAMS = {"negative_set", "component", "name"}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -45,6 +45,15 @@ def _set_nested(config: dict[str, Any], path: tuple[str, ...], value: Any) -> No
     cursor[path[-1]] = value
 
 
+def _deep_update(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    for key, value in overrides.items():
+        if isinstance(value, Mapping) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 def _fmt_value(value: Any) -> str:
     if isinstance(value, bool):
         return "1" if value else "0"
@@ -54,6 +63,8 @@ def _fmt_value(value: Any) -> str:
 
 
 def run_name_from_params(params: Mapping[str, Any]) -> str:
+    if params.get("component"):
+        return f"lowm_component_{_fmt_value(params['component'])}_seed{_fmt_value(params.get('seed', 0))}"
     if params.get("negative_set"):
         return (
             f"lowm_negs_{_fmt_value(params['negative_set'])}"
@@ -90,8 +101,10 @@ def expand_sweep(sweep: Mapping[str, Any]) -> list[dict[str, Any]]:
     return combos
 
 
-def build_run_config(base_config: Mapping[str, Any], params: Mapping[str, Any], sweep_dir: Path) -> dict[str, Any]:
+def build_run_config(base_config: Mapping[str, Any], params: Mapping[str, Any], sweep_dir: Path, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     config = deepcopy(dict(base_config))
+    if overrides:
+        _deep_update(config, overrides)
     for key, value in params.items():
         if key in METADATA_ONLY_PARAMS:
             continue
@@ -136,7 +149,7 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
         combos = combos[:max_runs]
 
     for params in combos:
-        run_config = build_run_config(base_config, params, sweep_dir)
+        run_config = build_run_config(base_config, params, sweep_dir, sweep.get("overrides", {}))
         run_name = str(run_config["training"]["run_name"])
         generated_config = configs_dir / f"{run_name}.yaml"
         _write_run_config(run_config, generated_config)

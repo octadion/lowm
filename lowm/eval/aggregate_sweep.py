@@ -79,6 +79,7 @@ def _sweep_params(run_dir: Path) -> dict[str, Any]:
     params.setdefault("beta_kl", training.get("beta_kl"))
     params.setdefault("seed", training.get("seed"))
     params.setdefault("negative_set", params.get("name"))
+    params.setdefault("component", params.get("name"))
     params.setdefault("negative_types", config.get("ranking", {}).get("negative_types"))
     return params
 
@@ -130,6 +131,7 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "use_stability",
         "beta_kl",
         "seed",
+        "component",
         "negative_set",
         "negative_types",
         "top1_acc",
@@ -152,7 +154,7 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
 
 
 def _write_md(rows: list[dict[str, Any]], path: Path) -> None:
-    columns = ["run_name", "alpha_occl", "lambda_dim", "seed", "law_only_top1", "law_pair", "law_gap", "top1_acc", "occl_tau_to_lambda_acc"]
+    columns = ["run_name", "component", "alpha_occl", "lambda_dim", "seed", "law_only_top1", "law_pair", "law_gap", "top1_acc", "occl_tau_to_lambda_acc"]
     lines = ["|" + "|".join(columns) + "|", "|" + "|".join(["---"] * len(columns)) + "|"]
     for row in rows:
         vals = []
@@ -213,6 +215,10 @@ def write_sweep_plots(rows: list[dict[str, Any]], out_dir: Path) -> None:
         _bar_plot(rows, "negative_set", "law_only_top1", "Law-only top1", plots / "negative_set_law_only_top1.png")
         _bar_plot(rows, "negative_set", "law_pair", "Law pair", plots / "negative_set_law_pair.png")
         _bar_plot(rows, "negative_set", "law_gap", "Law gap", plots / "negative_set_law_gap.png")
+    if any(row.get("component") for row in rows):
+        _bar_plot(rows, "component", "law_pair", "Law pair", plots / "component_ablation_law_pair.png")
+        _bar_plot(rows, "component", "law_gap", "Law gap", plots / "component_ablation_law_gap.png")
+        _bar_plot(rows, "component", "law_only_top1", "Law-only top1", plots / "component_ablation_law_only_top1.png")
 
 
 def aggregate_sweep(
