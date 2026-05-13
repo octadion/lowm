@@ -1,5 +1,6 @@
 import numpy as np
 
+from lowm.data.operators import ranges_from_config, sample_operator
 from lowm.data.simulate import SimulationConfig, simulate_episode, simulate_split
 
 
@@ -40,3 +41,28 @@ def test_operator_families_can_be_forced() -> None:
         episode = simulate_episode(rng, cfg, n=3, op_id=op_id)
         assert episode["op_id"] == op_id
         assert episode["states"].shape == (5, 6, 7)
+
+
+def test_ood_parameter_split_uses_held_out_continuous_ranges() -> None:
+    ranges = ranges_from_config(
+        {
+            "gravity": [-1.0, -0.5],
+            "gravity_ood": [[-1.5, -1.1], [-0.4, -0.2]],
+            "damping": [0.96, 0.99],
+            "damping_ood": [[0.90, 0.94], [0.995, 1.0]],
+            "attraction_k": [-0.015, 0.015],
+            "attraction_k_ood": [[-0.05, -0.025], [0.025, 0.05]],
+            "restitution": [0.45, 0.75],
+            "restitution_ood": [[0.05, 0.25], [0.85, 1.0]],
+        }
+    )
+    rng = np.random.default_rng(17)
+    for op_id in [0, 1, 2]:
+        _, params = sample_operator(rng, ranges, parameter_split="ood_param", op_id=op_id)
+        if op_id == 0:
+            assert not (-1.0 <= params[0] <= -0.5)
+            assert not (0.96 <= params[1] <= 0.99)
+        elif op_id == 1:
+            assert abs(params[2]) >= 0.025
+        elif op_id == 2:
+            assert not (0.45 <= params[3] <= 0.75)

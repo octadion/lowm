@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from lowm.data.operators import operator_metadata
+from lowm.data.operators import operator_metadata, ranges_to_metadata
 from lowm.data.simulate import config_from_mapping, simulate_split, with_split_overrides
 
 
@@ -47,8 +47,12 @@ def generate_dataset(config_path: Path, out_dir: Path, selected_splits: list[str
         if name not in splits:
             raise ValueError(f"split '{name}' not present in config")
         split_cfg = with_split_overrides(base_cfg, splits[name])
+        raw_split_cfg = dict(splits[name])
         seed = int(splits[name].get("seed", base_seed + offset))
         arrays = simulate_split(seed=seed, cfg=split_cfg)
+        split_type = str(raw_split_cfg.get("split_type", "ood_param" if split_cfg.parameter_split in {"ood", "ood_param"} else "iid"))
+        is_ood = bool(raw_split_cfg.get("is_ood", split_type.startswith("ood") or split_cfg.parameter_split.startswith("ood")))
+        arrays["is_ood"] = np.full((split_cfg.num_episodes,), int(is_ood), dtype=np.int64)
         np.savez_compressed(out_dir / f"{name}.npz", **arrays)
         counts = np.bincount(arrays["op_id"], minlength=4)
         split_summaries[name] = {
@@ -58,7 +62,10 @@ def generate_dataset(config_path: Path, out_dir: Path, selected_splits: list[str
             "n_min": int(split_cfg.n_min),
             "n_max": int(split_cfg.n_max),
             "nmax": int(split_cfg.nmax),
+            "split_type": split_type,
+            "is_ood": is_ood,
             "parameter_split": split_cfg.parameter_split,
+            "operator_ranges": ranges_to_metadata(split_cfg.operator_ranges),
             "op_counts": counts.astype(int).tolist(),
         }
         print(f"wrote {out_dir / f'{name}.npz'} with {split_cfg.num_episodes} episodes")

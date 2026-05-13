@@ -107,6 +107,67 @@ def test_component_sweep_dry_run_generates_eight_configs(tmp_path: Path) -> None
     assert one["training"]["train_samples_per_epoch"] == 5000
 
 
+def test_ood_sweep_dry_run_supports_baseline_and_multisplit(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "data": {"root": "data/lowm_synth_ood_param", "dataset_config": "configs/lowm_synth_ood_param.yaml"},
+                "ranking": {"negative_types": ["law_mismatch"]},
+                "model": {"lambda_dim": 16, "use_pairwise_energy": False},
+                "training": {"alpha_occl": 0.0, "beta_kl": 1e-4, "seed": 0, "selection_metric": "law_pair"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    sweep = tmp_path / "ood.yaml"
+    sweep.write_text(
+        yaml.safe_dump(
+            {
+                "base_config": str(base),
+                "sweep_dir": str(tmp_path / "ood_sweep"),
+                "variants": [
+                    {
+                        "variant": "direct_context_energy",
+                        "model_type": "direct_context_energy",
+                        "alpha_occl": 0.0,
+                        "lambda_dim": 16,
+                        "use_pairwise_energy": False,
+                        "use_stability": True,
+                        "beta_kl": 1e-4,
+                        "selection_metric": "law_pair",
+                        "seed": 0,
+                        "negative_set": "all",
+                        "negative_types": ["law_mismatch"],
+                    },
+                    {
+                        "variant": "lowm_omcr_no_pairwise",
+                        "model_type": "lowm",
+                        "alpha_occl": 0.0,
+                        "lambda_dim": 16,
+                        "use_pairwise_energy": False,
+                        "use_stability": True,
+                        "beta_kl": 1e-4,
+                        "selection_metric": "law_pair",
+                        "seed": 0,
+                        "negative_set": "all",
+                        "negative_types": ["law_mismatch"],
+                    },
+                ],
+                "evaluation": {"enabled": False, "splits": ["val", "test_iid", "test_ood_param"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runs = run_sweep(sweep, dry_run=True)
+    assert len(runs) == 2
+    generated = sorted((tmp_path / "ood_sweep" / "configs").glob("*.yaml"))
+    configs = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in generated]
+    baseline_configs = [config for config in configs if config["sweep_params"]["model_type"] == "direct_context_energy"]
+    assert baseline_configs[0]["training"]["baseline"] == "direct_context_energy"
+    assert any(config["sweep_params"]["variant"] == "lowm_omcr_no_pairwise" for config in configs)
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -155,6 +216,30 @@ def _write_dummy_run(sweep_dir: Path, name: str, params: dict) -> Path:
     return run
 
 
+def _write_split_metrics(run: Path, split: str, top1: float, law_pair: float, law_gap: float, law_only: float) -> None:
+    eval_dir = run / "eval" / split / "best_law_pair"
+    _write_json(
+        eval_dir / "eval_summary.json",
+        {
+            "model_type": "lowm",
+            "checkpoint_used": "best_law_pair.pt",
+            "split": split,
+            "ranking": {"top1_acc": top1, "law_pair": law_pair, "law_gap": law_gap, "mean_rank": 2.0, "mrr": 0.5},
+            "retrieval": {},
+            "occl_alignment": {},
+        },
+    )
+    (eval_dir / "negative_type_breakdown.csv").write_text(
+        "negative_type,pairwise_acc,mean_energy_gap,count,top1_acc_on_samples_with_type\n"
+        f"law_mismatch,{law_pair},{law_gap},10,{top1}\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run / "eval" / split / "law_mismatch_only_best_law_pair" / "law_mismatch_only_metrics.json",
+        {"law_only_top1": law_only, "pairwise_acc_law_only": law_pair, "mean_law_gap": law_gap},
+    )
+
+
 def test_aggregate_sweep_outputs_csv_markdown_and_plots(tmp_path: Path) -> None:
     sweep_dir = tmp_path / "sweep"
     run = _write_dummy_run(
@@ -187,3 +272,34 @@ def test_aggregate_sweep_outputs_csv_markdown_and_plots(tmp_path: Path) -> None:
     assert (out / "plots" / "component_ablation_law_pair.png").exists()
     assert (out / "plots" / "component_ablation_law_gap.png").exists()
     assert (out / "plots" / "component_ablation_law_only_top1.png").exists()
+
+
+def test_aggregate_sweep_multisplit_ood_stats_and_plots(tmp_path: Path) -> None:
+    sweep_dir = tmp_path / "ood_sweep"
+    params0 = {
+        "variant": "lowm_omcr_no_pairwise",
+        "model_type": "lowm",
+        "alpha_occl": 0.0,
+        "lambda_dim": 16,
+        "use_pairwise_energy": False,
+        "use_stability": True,
+        "beta_kl": 1e-4,
+        "seed": 0,
+        "negative_set": "all",
+        "negative_types": ["law_mismatch"],
+    }
+    params1 = dict(params0, seed=1)
+    run0 = _write_dummy_run(sweep_dir, "lowm_lowm_omcr_no_pairwise_seed0", params0)
+    run1 = _write_dummy_run(sweep_dir, "lowm_lowm_omcr_no_pairwise_seed1", params1)
+    for run, offset in [(run0, 0.0), (run1, 0.1)]:
+        _write_split_metrics(run, "test_iid", 0.8 + offset, 0.7 + offset, 1.0 + offset, 0.65 + offset)
+        _write_split_metrics(run, "test_ood_param", 0.7 + offset, 0.5 + offset, 0.6 + offset, 0.45 + offset)
+    (sweep_dir / "manifest.json").write_text(json.dumps({"runs": [str(run0), str(run1)]}), encoding="utf-8")
+    out = tmp_path / "out"
+    rows = aggregate_sweep(sweep_dir, out, split=["val", "test_iid", "test_ood_param"])
+    assert len(rows) == 6
+    assert (out / "ablation_summary_stats.csv").exists()
+    assert (out / "ablation_summary_stats.md").exists()
+    assert (out / "plots" / "iid_vs_ood_law_pair.png").exists()
+    assert (out / "plots" / "iid_vs_ood_law_only_top1.png").exists()
+    assert (out / "plots" / "ood_degradation.png").exists()

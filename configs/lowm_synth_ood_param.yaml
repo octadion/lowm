@@ -1,0 +1,86 @@
+dataset: LOWM-Synth
+version: ood-param-v0
+seed: 0
+
+simulation:
+  T: 20
+  world_size: 1.0
+  dt: 0.05
+  nmax: 6
+  max_speed: 5.0
+  wall_damping: 0.5
+
+objects:
+  radius_min: 0.025
+  radius_max: 0.055
+  mass_min: 0.5
+  mass_max: 2.0
+  velocity_min: -0.25
+  velocity_max: 0.25
+  num_types: 3
+
+actions:
+  impulse_prob: 0.15
+  force_min: -0.5
+  force_max: 0.5
+
+operators:
+  # IID ranges are intentionally moderate. The OOD split samples from
+  # held-out stronger/weaker continuous parameter ranges.
+  gravity: [-1.0, -0.5]
+  gravity_ood: [[-1.5, -1.1], [-0.4, -0.2]]
+  gravity_ood_low: [-1.5, -1.1]
+  gravity_ood_high: [-0.4, -0.2]
+  damping: [0.96, 0.99]
+  damping_ood: [[0.90, 0.94], [0.995, 1.0]]
+  attraction_k: [-0.015, 0.015]
+  attraction_k_ood: [[-0.05, -0.025], [0.025, 0.05]]
+  restitution: [0.45, 0.75]
+  restitution_ood: [[0.05, 0.25], [0.85, 1.0]]
+
+splits:
+  train:
+    num_episodes: 1000
+    n_min: 3
+    n_max: 5
+    parameter_split: iid
+    split_type: iid_train
+    is_ood: false
+    seed: 0
+  val:
+    num_episodes: 200
+    n_min: 3
+    n_max: 5
+    parameter_split: iid
+    split_type: iid_val
+    is_ood: false
+    seed: 1
+  test_iid:
+    num_episodes: 500
+    n_min: 3
+    n_max: 5
+    parameter_split: iid
+    split_type: iid_test
+    is_ood: false
+    seed: 2
+  test_ood_param:
+    num_episodes: 500
+    n_min: 3
+    n_max: 5
+    parameter_split: ood_param
+    split_type: ood_param_test
+    is_ood: true
+    seed: 3
+
+ranking:
+  K: 8
+  H: 6
+  M: 5
+  seed: 123
+  min_law_param_distance: 0.15
+  ensure_distinct_operators_in_batch: true
+  negative_types:
+    - state_corrupted
+    - temporal_shuffled
+    - law_mismatch
+    - random_impossible

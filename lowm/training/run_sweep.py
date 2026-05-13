@@ -14,6 +14,7 @@ import yaml
 from lowm.eval.evaluate_all import evaluate_run
 from lowm.eval.evaluate_law_mismatch_only import evaluate_law_mismatch_only
 from lowm.eval.evaluate_occl_alignment import evaluate_occl_alignment
+from lowm.training.train_baseline import train_baseline
 from lowm.training.train_lowm import train_lowm
 
 
@@ -27,7 +28,7 @@ SWEEP_TO_CONFIG_PATH = {
     "negative_types": ("ranking", "negative_types"),
     "selection_metric": ("training", "selection_metric"),
 }
-METADATA_ONLY_PARAMS = {"negative_set", "component", "name"}
+METADATA_ONLY_PARAMS = {"negative_set", "component", "name", "variant", "model_type"}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -63,6 +64,9 @@ def _fmt_value(value: Any) -> str:
 
 
 def run_name_from_params(params: Mapping[str, Any]) -> str:
+    if params.get("variant"):
+        model = _fmt_value(params.get("model_type", "lowm"))
+        return f"{model}_{_fmt_value(params['variant'])}_seed{_fmt_value(params.get('seed', 0))}"
     if params.get("component"):
         return f"lowm_component_{_fmt_value(params['component'])}_seed{_fmt_value(params.get('seed', 0))}"
     if params.get("negative_set"):
@@ -116,7 +120,11 @@ def build_run_config(base_config: Mapping[str, Any], params: Mapping[str, Any], 
     _set_nested(config, ("training", "seed"), seed)
     _set_nested(config, ("training", "output_dir"), str(sweep_dir / "runs"))
     _set_nested(config, ("training", "run_name"), run_name_from_params(params))
-    _set_nested(config, ("training", "use_occl"), True)
+    model_type = str(params.get("model_type", "lowm"))
+    if model_type in {"fixed_energy", "direct_context_energy"}:
+        _set_nested(config, ("training", "baseline"), model_type)
+    else:
+        _set_nested(config, ("training", "use_occl"), True)
     config["sweep_params"] = dict(params)
     return config
 
@@ -134,6 +142,8 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
     sweep_dir = Path(sweep.get("sweep_dir", "runs/lowm_synth_v0/lowm_occl_ablation"))
     eval_cfg = dict(sweep.get("evaluation", {}))
     split = str(eval_cfg.get("split", "val"))
+    raw_splits = eval_cfg.get("splits")
+    splits = [str(item) for item in raw_splits] if isinstance(raw_splits, list) and raw_splits else [split]
     eval_num_samples = eval_cfg.get("num_samples")
     eval_batch_size = eval_cfg.get("batch_size")
     device = str(eval_cfg.get("device", "auto"))
@@ -158,11 +168,17 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
         print(f"prepared {run_name}")
         if dry_run or bool(sweep.get("dry_run", False)):
             continue
-        train_lowm(generated_config)
+        model_type = str(params.get("model_type", "lowm"))
+        if model_type in {"fixed_energy", "direct_context_energy"}:
+            train_baseline(generated_config)
+        else:
+            train_lowm(generated_config)
         if evaluate:
-            evaluate_run(run_dir, split=split, checkpoint_name=ranking_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
-            evaluate_law_mismatch_only(run_dir, split=split, checkpoint_name=law_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
-            evaluate_occl_alignment(run_dir, split=split, checkpoint_name=occl_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
+            for eval_split in splits:
+                evaluate_run(run_dir, split=eval_split, checkpoint_name=ranking_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
+                evaluate_law_mismatch_only(run_dir, split=eval_split, checkpoint_name=law_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
+                if model_type == "lowm":
+                    evaluate_occl_alignment(run_dir, split=eval_split, checkpoint_name=occl_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
 
     manifest = {"config": str(config_path), "runs": [str(path) for path in run_paths]}
     sweep_dir.mkdir(parents=True, exist_ok=True)
