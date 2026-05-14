@@ -113,6 +113,17 @@ python -m lowm.eval.evaluate_law_mismatch_only --run runs/lowm_synth_ood_param/m
 python -m lowm.eval.aggregate_sweep --sweep_dir runs/lowm_synth_ood_param/main --out runs/lowm_synth_ood_param/main/summary --splits val test_iid test_ood_param
 ```
 
+Active Operator Inference:
+
+```bash
+python -m lowm.eval.active_operator_inference --run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_iid --checkpoint best_law_pair.pt --num-episodes 200 --num-operator-hypotheses 4 --num-actions 8 --horizon 3
+python -m lowm.eval.active_operator_inference --run runs/lowm_synth_ood_param/main/runs/lowm_no_law_mismatch_seed0 --split test_iid --checkpoint best_law_pair.pt --num-episodes 200 --num-operator-hypotheses 4 --num-actions 8 --horizon 3
+python -m lowm.eval.active_operator_inference --run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_ood_param --checkpoint best_law_pair.pt --num-episodes 200 --num-operator-hypotheses 4 --num-actions 8 --horizon 3
+python -m lowm.eval.aggregate_aoi --runs runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 runs/lowm_synth_ood_param/main/runs/lowm_no_law_mismatch_seed0 --out runs/lowm_synth_ood_param/main/aoi_summary --split test_iid
+```
+
+AOI writes `aoi_metrics.json`, per-episode decisions, action score examples, and plots under `<run>/eval/<split>/aoi/`. The primary diagnostic is AOI with an OMC critic versus the no-law-mismatch critic.
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:
