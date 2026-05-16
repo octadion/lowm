@@ -146,6 +146,18 @@ python -m lowm.eval.aggregate_ebtwm_shaping --sweep_dir runs/lowm_synth_ood_para
 
 Hybrid shaping adds DSM, clean-vs-noisy ranking, and optional gradient regularization to the OMC ranking objective. OCCL remains disabled in these configs.
 
+LOWM-G proposal dynamics and OMC reranking:
+
+```bash
+python -m lowm.training.train_lowm_g --config configs/train_lowm_g.yaml
+python -m lowm.eval.evaluate_lowm_g --proposal-run runs/lowm_synth_ood_param/lowm_g/lowm_g_seed0 --critic-run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split val --proposal-checkpoint best_pred.pt --critic-checkpoint best_law_pair.pt --num-samples 500 --num-candidates 16 --context-length 2 --candidate-noise-scale 0.5
+python -m lowm.eval.evaluate_lowm_g --proposal-run runs/lowm_synth_ood_param/lowm_g/lowm_g_seed0 --critic-run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_ood_param --proposal-checkpoint best_pred.pt --critic-checkpoint best_law_pair.pt --num-samples 500 --num-candidates 16 --context-length 2 --candidate-noise-scale 0.5
+python -m lowm.eval.evaluate_lowm_g --proposal-run runs/lowm_synth_ood_param/lowm_g/lowm_g_seed0 --compare-critics runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 runs/lowm_synth_ood_param/main/runs/lowm_no_law_mismatch_seed0 --split test_iid --proposal-checkpoint best_pred.pt --critic-checkpoint best_law_pair.pt --num-samples 500 --num-candidates 16 --context-length 2 --candidate-noise-scale 0.5 --out runs/lowm_synth_ood_param/lowm_g/cross_critic
+python -m lowm.eval.evaluate_lowm_g --proposal-run runs/lowm_synth_ood_param/lowm_g/lowm_g_seed0 --critic-run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_iid --mode counterfactual --num-samples 500 --num-candidates 16 --context-length 2
+```
+
+LOWM-G is trained only with supervised rollout prediction losses. The OMC critic is used only at inference time to rerank generated candidates; critic energy is not backpropagated into the generator.
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:

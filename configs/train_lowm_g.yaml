@@ -1,0 +1,53 @@
+seed: 0
+
+data:
+  root: data/lowm_synth_ood_param
+  train_split: train.npz
+  val_split: val.npz
+  test_iid_split: test_iid.npz
+  test_ood_param_split: test_ood_param.npz
+  generate_if_missing: true
+  dataset_config: configs/lowm_synth_ood_param.yaml
+
+ranking:
+  K: 8
+  H: 6
+  M: 5
+  seed: 123
+  min_law_param_distance: 0.15
+  negative_types:
+    - state_corrupted
+    - temporal_shuffled
+    - law_mismatch
+    - random_impossible
+
+model:
+  object_dim: 7
+  action_dim: 2
+  lambda_dim: 16
+  context_dim: 128
+  proposal_hidden_dim: 128
+  proposal_num_layers: 2
+  proposal_noise_dim: 8
+  proposal_use_noise: true
+  proposal_dropout: 0.0
+  proposal_use_mu: true
+
+training:
+  seed: 0
+  output_dir: runs/lowm_synth_ood_param/lowm_g
+  run_name: lowm_g_seed0
+  device: auto
+  epochs: 30
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  alpha_delta: 0.0
+  alpha_smooth: 0.0
+  candidate_noise_scale_train: 1.0
+  num_workers: 0
+  train_samples_per_epoch: 5000
+  val_samples: 1000
+
+evaluation:
+  num_samples: 1000
