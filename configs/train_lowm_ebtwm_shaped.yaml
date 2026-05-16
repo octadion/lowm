@@ -1,0 +1,73 @@
+seed: 0
+
+data:
+  root: data/lowm_synth_ood_param
+  train_split: train.npz
+  val_split: val.npz
+  test_iid_split: test_iid.npz
+  test_ood_param_split: test_ood_param.npz
+  generate_if_missing: true
+  dataset_config: configs/lowm_synth_ood_param.yaml
+
+ranking:
+  K: 8
+  H: 6
+  M: 5
+  seed: 123
+  min_law_param_distance: 0.15
+  ensure_distinct_operators_in_batch: true
+  negative_types:
+    - state_corrupted
+    - temporal_shuffled
+    - law_mismatch
+    - random_impossible
+
+model:
+  object_dim: 7
+  action_dim: 2
+  lambda_dim: 16
+  hidden_dim: 128
+  context_dim: 128
+  num_layers: 2
+  dropout: 0.0
+  use_pairwise_energy: false
+  use_mu_eval: true
+  energy_reduction: sum
+
+training:
+  seed: 0
+  output_dir: runs/lowm_synth_ood_param/ebtwm_shaping/runs
+  run_name: lowm_ebtwm_shaped_seed0
+  device: auto
+  epochs: 30
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  beta_kl: 0.0001
+  alpha_stable: 0.1
+  use_stability: true
+  use_occl: false
+  alpha_occl: 0.0
+  use_dsm: true
+  alpha_dsm: 1.0
+  dsm_noise_stds: [0.01, 0.03, 0.05, 0.1]
+  dsm_batch_fraction: 1.0
+  dsm_clip_grad_target:
+  dsm_future_only: true
+  use_denoise_rank: true
+  alpha_denoise_rank: 0.1
+  denoise_rank_margin: 1.0
+  use_grad_reg: false
+  alpha_grad_reg: 0.0001
+  ensure_distinct_operators_in_batch: true
+  selection_metric: law_pair
+  num_workers: 0
+  train_samples_per_epoch: 5000
+  val_samples: 1000
+
+evaluation:
+  num_samples: 1000
+  retrieval_queries: 128
+  retrieval_pool_size: 8
+  disentanglement_samples: 256
+  debug_energy_samples: 32

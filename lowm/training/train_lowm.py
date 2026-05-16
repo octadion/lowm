@@ -20,7 +20,12 @@ from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.metrics import RankingMetricAccumulator, format_metrics
 from lowm.models.lowm import LOWM, lowm_config_from_mapping
 from lowm.training.checkpointing import MultiMetricCheckpointer, checkpoint_payload
-from lowm.training.losses import law_stability_loss, lowm_total_loss, operator_coherence_contrastive_loss
+from lowm.training.losses import (
+    denoising_energy_shaping_loss,
+    law_stability_loss,
+    lowm_total_loss,
+    operator_coherence_contrastive_loss,
+)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -163,6 +168,67 @@ def _add_occl_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return metrics
 
 
+def _data_std_per_dim(dataset: LOWMSynthRankingDataset) -> torch.Tensor:
+    active = dataset.mask > 0.5
+    dyn = dataset.states[..., 0:4]
+    vals = dyn[active]
+    if vals.size == 0:
+        return torch.ones(4, dtype=torch.float32)
+    return torch.from_numpy(np.maximum(vals.reshape(-1, 4).std(axis=0), 1e-3).astype(np.float32))
+
+
+def _shaping_from_batch(
+    model: LOWM,
+    batch: Mapping[str, torch.Tensor],
+    lambdas: torch.Tensor,
+    train_cfg: Mapping[str, Any],
+    data_std: torch.Tensor,
+    create_graph: bool,
+) -> dict[str, torch.Tensor] | None:
+    use_dsm = bool(train_cfg.get("use_dsm", False))
+    use_rank = bool(train_cfg.get("use_denoise_rank", False))
+    use_grad_reg = bool(train_cfg.get("use_grad_reg", False))
+    if not (use_dsm or use_rank or use_grad_reg):
+        return None
+    raw_stds = train_cfg.get("dsm_noise_stds", [0.01, 0.03, 0.05, 0.1])
+    if not isinstance(raw_stds, (list, tuple)):
+        raw_stds = [float(raw_stds)]
+    return denoising_energy_shaping_loss(
+        model,
+        dict(batch),
+        lambdas,
+        data_std.to(batch["pos_states"].device),
+        noise_stds=tuple(float(x) for x in raw_stds),
+        batch_fraction=float(train_cfg.get("dsm_batch_fraction", 1.0)),
+        clip_grad_target=train_cfg.get("dsm_clip_grad_target"),
+        future_only=bool(train_cfg.get("dsm_future_only", True)),
+        use_dsm=use_dsm,
+        use_denoise_rank=use_rank,
+        denoise_rank_margin=float(train_cfg.get("denoise_rank_margin", 1.0)),
+        use_grad_reg=use_grad_reg,
+        create_graph=create_graph,
+    )
+
+
+def _apply_shaping_to_losses(
+    losses: dict[str, torch.Tensor],
+    shaping: dict[str, torch.Tensor] | None,
+    train_cfg: Mapping[str, Any],
+) -> None:
+    if not shaping:
+        return
+    alpha_dsm = float(train_cfg.get("alpha_dsm", 1.0))
+    alpha_rank = float(train_cfg.get("alpha_denoise_rank", 0.1))
+    alpha_grad = float(train_cfg.get("alpha_grad_reg", 1e-4))
+    losses["total"] = (
+        losses["total"]
+        + alpha_dsm * shaping["dsm_loss"]
+        + alpha_rank * shaping["denoise_rank_loss"]
+        + alpha_grad * shaping["grad_reg_loss"]
+    )
+    losses.update(shaping)
+
+
 def evaluate_lowm(
     model: LOWM,
     loader,
@@ -173,13 +239,18 @@ def evaluate_lowm(
     alpha_occl: float = 0.0,
     use_occl: bool = False,
     occl_temperature: float = 1.0,
+    train_cfg: Mapping[str, Any] | None = None,
+    data_std: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     model.eval()
+    train_cfg = train_cfg or {}
+    data_std = data_std if data_std is not None else torch.ones(4, device=device)
+    needs_shaping_grad = bool(train_cfg.get("use_dsm", False) or train_cfg.get("use_denoise_rank", False) or train_cfg.get("use_grad_reg", False))
     metrics_acc = RankingMetricAccumulator()
     loss_acc = LossAverages()
-    with torch.no_grad():
-        for batch in loader:
-            batch = _move_batch_to_device(batch, device)
+    for batch in loader:
+        batch = _move_batch_to_device(batch, device)
+        with torch.set_grad_enabled(needs_shaping_grad):
             output = model(batch)
             stability = _stability_from_batch(model, batch, use_stability)
             occl = _occl_from_batch(model, batch, output["lambda"], use_occl, occl_temperature)
@@ -197,9 +268,11 @@ def evaluate_lowm(
             if occl:
                 losses.update(occl)
                 losses.update(_operator_batch_stats(batch))
-            batch_size = int(batch["labels"].shape[0])
-            loss_acc.update(losses, batch_size)
-            metrics_acc.update(output["energies"], batch["labels"], batch["negative_types"], float(losses["total"].item()))
+            shaping = _shaping_from_batch(model, batch, output["lambda"], train_cfg, data_std, create_graph=False)
+            _apply_shaping_to_losses(losses, shaping, train_cfg)
+        batch_size = int(batch["labels"].shape[0])
+        loss_acc.update(losses, batch_size)
+        metrics_acc.update(output["energies"].detach(), batch["labels"], batch["negative_types"], float(losses["total"].item()))
     metrics = metrics_acc.compute()
     metrics["loss_terms"] = loss_acc.compute()
     return _add_occl_metrics(metrics)
@@ -217,8 +290,12 @@ def train_one_epoch(
     use_occl: bool = False,
     occl_temperature: float = 1.0,
     max_steps: int | None = None,
+    train_cfg: Mapping[str, Any] | None = None,
+    data_std: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     model.train()
+    train_cfg = train_cfg or {}
+    data_std = data_std if data_std is not None else torch.ones(4, device=device)
     metrics_acc = RankingMetricAccumulator()
     loss_acc = LossAverages()
     for step, batch in enumerate(loader):
@@ -243,6 +320,8 @@ def train_one_epoch(
         if occl:
             losses.update(occl)
             losses.update(_operator_batch_stats(batch))
+        shaping = _shaping_from_batch(model, batch, output["lambda"], train_cfg, data_std, create_graph=True)
+        _apply_shaping_to_losses(losses, shaping, train_cfg)
         losses["total"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         optimizer.step()
@@ -270,7 +349,17 @@ def _format_lowm_metrics(metrics: Mapping[str, Any], prefix: str) -> str:
         f"{prefix}occl_acc_lambda_to_tau={loss_terms.get('occl_acc_lambda_to_tau', float('nan')):.4f} "
         f"{prefix}occl_op_param_dist={loss_terms.get('occl_batch_mean_pairwise_op_param_distance', float('nan')):.4f} "
         f"{prefix}occl_same_op_frac={loss_terms.get('occl_batch_fraction_same_op_id', float('nan')):.4f} "
-        f"{prefix}occl_effective_unique_op={loss_terms.get('occl_batch_effective_unique_op_id', float('nan')):.4f}"
+        f"{prefix}occl_effective_unique_op={loss_terms.get('occl_batch_effective_unique_op_id', float('nan')):.4f} "
+        f"{prefix}dsm_loss={loss_terms.get('dsm_loss', float('nan')):.4f} "
+        f"{prefix}denoise_rank_loss={loss_terms.get('denoise_rank_loss', float('nan')):.4f} "
+        f"{prefix}grad_reg_loss={loss_terms.get('grad_reg_loss', float('nan')):.4f} "
+        f"{prefix}dsm_grad_norm={loss_terms.get('dsm_grad_norm', float('nan')):.4f} "
+        f"{prefix}dsm_target_norm={loss_terms.get('dsm_target_norm', float('nan')):.4f} "
+        f"{prefix}dsm_cosine={loss_terms.get('dsm_cosine_to_clean_direction', float('nan')):.4f} "
+        f"{prefix}clean_energy={loss_terms.get('clean_energy', float('nan')):.4f} "
+        f"{prefix}noisy_energy={loss_terms.get('noisy_energy', float('nan')):.4f} "
+        f"{prefix}clean_noisy_gap={loss_terms.get('clean_noisy_gap', float('nan')):.4f} "
+        f"{prefix}clean_noisy_pair_acc={loss_terms.get('clean_noisy_pair_acc', float('nan')):.4f}"
     )
 
 
@@ -299,6 +388,7 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
     val_samples = train_cfg.get("val_samples")
     train_dataset = LOWMSynthRankingDataset(train_path, ranking_cfg, num_samples=int(train_samples) if train_samples else None)
     val_dataset = LOWMSynthRankingDataset(val_path, ranking_cfg, num_samples=int(val_samples) if val_samples else None)
+    data_std = _data_std_per_dim(train_dataset)
 
     batch_size = int(train_cfg.get("batch_size", 64))
     num_workers = int(train_cfg.get("num_workers", 0))
@@ -375,6 +465,8 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
             use_occl,
             occl_temperature,
             max_steps,
+            train_cfg,
+            data_std,
         )
         val_metrics = evaluate_lowm(
             model,
@@ -386,6 +478,8 @@ def train_lowm(config_path: Path) -> dict[str, Any]:
             alpha_occl,
             use_occl,
             occl_temperature,
+            train_cfg,
+            data_std,
         )
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
         print(

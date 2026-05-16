@@ -1,0 +1,41 @@
+base_config: configs/train_lowm_ebtwm_shaped.yaml
+sweep_dir: runs/lowm_synth_ood_param/ebtwm_shaping_debug
+
+overrides:
+  training:
+    epochs: 3
+    train_samples_per_epoch: 500
+    val_samples: 200
+    batch_size: 32
+    use_occl: false
+    alpha_occl: 0.0
+  model:
+    use_pairwise_energy: false
+
+evaluation:
+  enabled: true
+  split: val
+  ranking_checkpoint: best_law_pair.pt
+  law_checkpoint: best_law_pair.pt
+  ebtwm_inference: true
+  ebtwm:
+    num_samples: 20
+    num_steps: 20
+    step_size: 0.01
+    noise_std: 0.05
+    corruption_type: gaussian
+    skip_preflight: true
+
+variants:
+  - variant: ebtwm_debug_alpha0.5
+    alpha_dsm: 0.5
+    alpha_denoise_rank: 0.1
+    use_grad_reg: false
+    seed: 0
+    use_occl: false
+  - variant: ebtwm_debug_alpha1.0
+    alpha_dsm: 1.0
+    alpha_denoise_rank: 0.1
+    use_grad_reg: false
+    seed: 0
+    use_occl: false

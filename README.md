@@ -134,6 +134,18 @@ python -m lowm.eval.ebtwm_inference --compare-runs runs/lowm_synth_ood_param/mai
 
 EBTWM writes `metrics.json`, per-sample metrics, optimization curves, cross-operator energies, and before/after trajectory plots under `<run>/eval/<split>/ebtwm_inference/`. The `go_no_go_decision` field reports the strict pilot verdict.
 
+Hybrid EBTWM shaping:
+
+```bash
+python -m lowm.eval.energy_gradient_diagnostic --run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_iid --checkpoint best_law_pair.pt --num-samples 100 --noise-std 0.05
+python -m lowm.training.train_lowm --config configs/train_lowm_ebtwm_shaped.yaml
+python -m lowm.training.run_sweep --config configs/sweeps/ebtwm_shaping_alpha_debug.yaml
+python -m lowm.training.run_sweep --config configs/sweeps/ebtwm_shaping_alpha.yaml
+python -m lowm.eval.aggregate_ebtwm_shaping --sweep_dir runs/lowm_synth_ood_param/ebtwm_shaping --out runs/lowm_synth_ood_param/ebtwm_shaping/summary
+```
+
+Hybrid shaping adds DSM, clean-vs-noisy ranking, and optional gradient regularization to the OMC ranking objective. OCCL remains disabled in these configs.
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:

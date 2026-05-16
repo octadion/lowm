@@ -12,6 +12,7 @@ from typing import Any, Mapping
 import yaml
 
 from lowm.eval.evaluate_all import evaluate_run
+from lowm.eval.ebtwm_inference import evaluate_ebtwm_inference
 from lowm.eval.evaluate_law_mismatch_only import evaluate_law_mismatch_only
 from lowm.eval.evaluate_occl_alignment import evaluate_occl_alignment
 from lowm.training.train_baseline import train_baseline
@@ -27,6 +28,13 @@ SWEEP_TO_CONFIG_PATH = {
     "seed": ("training", "seed"),
     "negative_types": ("ranking", "negative_types"),
     "selection_metric": ("training", "selection_metric"),
+    "use_occl": ("training", "use_occl"),
+    "use_dsm": ("training", "use_dsm"),
+    "alpha_dsm": ("training", "alpha_dsm"),
+    "use_denoise_rank": ("training", "use_denoise_rank"),
+    "alpha_denoise_rank": ("training", "alpha_denoise_rank"),
+    "use_grad_reg": ("training", "use_grad_reg"),
+    "alpha_grad_reg": ("training", "alpha_grad_reg"),
 }
 METADATA_ONLY_PARAMS = {"negative_set", "component", "name", "variant", "model_type"}
 
@@ -67,6 +75,8 @@ def run_name_from_params(params: Mapping[str, Any]) -> str:
     if params.get("variant"):
         model = _fmt_value(params.get("model_type", "lowm"))
         return f"{model}_{_fmt_value(params['variant'])}_seed{_fmt_value(params.get('seed', 0))}"
+    if "alpha_dsm" in params:
+        return f"lowm_ebtwm_alpha{_fmt_value(params.get('alpha_dsm'))}_seed{_fmt_value(params.get('seed', 0))}"
     if params.get("component"):
         return f"lowm_component_{_fmt_value(params['component'])}_seed{_fmt_value(params.get('seed', 0))}"
     if params.get("negative_set"):
@@ -124,7 +134,7 @@ def build_run_config(base_config: Mapping[str, Any], params: Mapping[str, Any], 
     if model_type in {"fixed_energy", "direct_context_energy"}:
         _set_nested(config, ("training", "baseline"), model_type)
     else:
-        _set_nested(config, ("training", "use_occl"), True)
+        _set_nested(config, ("training", "use_occl"), bool(params.get("use_occl", config.get("training", {}).get("use_occl", True))))
     config["sweep_params"] = dict(params)
     return config
 
@@ -150,6 +160,8 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
     ranking_checkpoint = str(eval_cfg.get("ranking_checkpoint", "best_law_pair.pt"))
     law_checkpoint = str(eval_cfg.get("law_checkpoint", "best_law_pair.pt"))
     occl_checkpoint = str(eval_cfg.get("occl_checkpoint", "best_occl_acc.pt"))
+    run_ebtwm = bool(eval_cfg.get("ebtwm_inference", False))
+    ebtwm_cfg = dict(eval_cfg.get("ebtwm", {}))
     evaluate = bool(eval_cfg.get("enabled", True))
 
     configs_dir = sweep_dir / "configs"
@@ -179,6 +191,26 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
                 evaluate_law_mismatch_only(run_dir, split=eval_split, checkpoint_name=law_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
                 if model_type == "lowm":
                     evaluate_occl_alignment(run_dir, split=eval_split, checkpoint_name=occl_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
+                if run_ebtwm and model_type == "lowm":
+                    evaluate_ebtwm_inference(
+                        run_dir,
+                        split=eval_split,
+                        checkpoint=ranking_checkpoint,
+                        num_samples=int(ebtwm_cfg.get("num_samples", eval_num_samples or 100)),
+                        num_steps=int(ebtwm_cfg.get("num_steps", 100)),
+                        step_size=float(ebtwm_cfg.get("step_size", 1e-2)),
+                        noise_std=float(ebtwm_cfg.get("noise_std", 0.05)),
+                        corruption_type=str(ebtwm_cfg.get("corruption_type", "gaussian")),
+                        horizon=ebtwm_cfg.get("horizon"),
+                        device=device,
+                        mode=str(ebtwm_cfg.get("mode", "denoise")),
+                        eta_smooth=float(ebtwm_cfg.get("eta_smooth", 0.01)),
+                        eta_anchor=float(ebtwm_cfg.get("eta_anchor", 0.01)),
+                        eta_bounds=float(ebtwm_cfg.get("eta_bounds", 0.0)),
+                        langevin_noise=float(ebtwm_cfg.get("langevin_noise", 0.0)),
+                        seed=int(ebtwm_cfg.get("seed", 0)),
+                        skip_preflight=bool(ebtwm_cfg.get("skip_preflight", False)),
+                    )
 
     manifest = {"config": str(config_path), "runs": [str(path) for path in run_paths]}
     sweep_dir.mkdir(parents=True, exist_ok=True)
