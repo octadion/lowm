@@ -124,6 +124,16 @@ python -m lowm.eval.aggregate_aoi --runs runs/lowm_synth_ood_param/main/runs/low
 
 AOI writes `aoi_metrics.json`, per-episode decisions, action score examples, and plots under `<run>/eval/<split>/aoi/`. The primary diagnostic is AOI with an OMC critic versus the no-law-mismatch critic.
 
+EBTWM inference pilot:
+
+```bash
+python -m lowm.eval.ebtwm_inference --run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_iid --checkpoint best_law_pair.pt --num-samples 100 --num-steps 100 --step-size 1e-2 --noise-std 0.05 --corruption-type gaussian
+python -m lowm.eval.ebtwm_inference --run runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 --split test_iid --checkpoint best_law_pair.pt --mode counterfactual --num-samples 100 --num-steps 100 --step-size 1e-2
+python -m lowm.eval.ebtwm_inference --compare-runs runs/lowm_synth_ood_param/main/runs/lowm_lowm_omcr_no_pairwise_seed0 runs/lowm_synth_ood_param/main/runs/lowm_no_law_mismatch_seed0 --split test_iid --compare-out runs/lowm_synth_ood_param/main/ebtwm_cross_critic
+```
+
+EBTWM writes `metrics.json`, per-sample metrics, optimization curves, cross-operator energies, and before/after trajectory plots under `<run>/eval/<split>/ebtwm_inference/`. The `go_no_go_decision` field reports the strict pilot verdict.
+
 ## Stored Arrays
 
 Each split is a compressed `.npz` file with:
