@@ -82,15 +82,51 @@ class LOWMSynthRankingDataset(Dataset[dict[str, Any]]):
             raise ValueError("M must include one positive and at least one negative")
 
         with np.load(self.path) as data:
-            self.states = data["states"].astype(np.float32)
-            self.actions = data["actions"].astype(np.float32)
-            self.mask = data["mask"].astype(np.float32)
+            self.is_paired_context = "context_states" in data.files and "positive_states" in data.files
+            if self.is_paired_context:
+                self.context_source_states = data["context_states"].astype(np.float32)
+                self.states = data["positive_states"].astype(np.float32)
+                self.context_source_mask = data["context_mask"].astype(np.float32) if "context_mask" in data.files else np.ones(
+                    self.context_source_states.shape[:3], dtype=np.float32
+                )
+                self.mask = data["positive_mask"].astype(np.float32) if "positive_mask" in data.files else (
+                    data["mask"].astype(np.float32) if "mask" in data.files else np.ones(self.states.shape[:3], dtype=np.float32)
+                )
+                if "context_actions" in data.files:
+                    self.context_source_actions = data["context_actions"].astype(np.float32)
+                else:
+                    self.context_source_actions = np.zeros(
+                        (self.context_source_states.shape[0], self.context_source_states.shape[1] - 1, self.context_source_states.shape[2], 2),
+                        dtype=np.float32,
+                    )
+                if "positive_actions" in data.files:
+                    self.actions = data["positive_actions"].astype(np.float32)
+                elif "actions" in data.files:
+                    self.actions = data["actions"].astype(np.float32)
+                else:
+                    self.actions = np.zeros((self.states.shape[0], self.states.shape[1] - 1, self.states.shape[2], 2), dtype=np.float32)
+            else:
+                self.context_source_states = None
+                self.context_source_actions = None
+                self.context_source_mask = None
+                self.states = data["states"].astype(np.float32)
+                self.actions = data["actions"].astype(np.float32)
+                self.mask = data["mask"].astype(np.float32)
             self.op_id = data["op_id"].astype(np.int64)
             self.op_params = data["op_params"].astype(np.float32)
             self.num_objects = data["num_objects"].astype(np.int64)
 
         self.num_episodes, self.tp1, self.nmax, self.d_object = self.states.shape
         self.T = self.tp1 - 1
+        if self.is_paired_context:
+            if self.context_source_states is None or self.context_source_actions is None or self.context_source_mask is None:
+                raise ValueError("paired context dataset did not initialize context arrays")
+            if self.context_source_states.shape != self.states.shape:
+                raise ValueError("context_states and positive_states must have the same shape")
+            if self.context_source_actions.shape != (self.num_episodes, self.T, self.nmax, 2):
+                raise ValueError("context_actions shape does not match context_states")
+            if self.context_source_mask.shape != (self.num_episodes, self.tp1, self.nmax):
+                raise ValueError("context_mask shape does not match context_states")
         if self.actions.shape != (self.num_episodes, self.T, self.nmax, 2):
             raise ValueError("actions shape does not match states")
         if self.mask.shape != (self.num_episodes, self.tp1, self.nmax):
@@ -159,6 +195,21 @@ class LOWMSynthRankingDataset(Dataset[dict[str, Any]]):
         context_mask = np.zeros((self.cfg.K, 2, self.nmax), dtype=np.float32)
         context_episodes = np.zeros((self.cfg.K,), dtype=np.int64)
         context_times = np.zeros((self.cfg.K,), dtype=np.int64)
+
+        if self.is_paired_context:
+            if self.context_source_states is None or self.context_source_actions is None or self.context_source_mask is None:
+                raise ValueError("paired context dataset did not initialize context arrays")
+            valid_times = np.arange(self.T)
+            for k in range(self.cfg.K):
+                t = int(rng.choice(valid_times))
+                context_states[k, 0] = self.context_source_states[query_ep, t]
+                context_states[k, 1] = self.context_source_states[query_ep, t + 1]
+                context_actions[k] = self.context_source_actions[query_ep, t]
+                context_mask[k, 0] = self.context_source_mask[query_ep, t]
+                context_mask[k, 1] = self.context_source_mask[query_ep, t + 1]
+                context_episodes[k] = query_ep
+                context_times[k] = t
+            return context_states, context_actions, context_mask, context_episodes, context_times
 
         same_op = self._by_op.get(int(self.op_id[query_ep]), self._all_indices)
         preferred = same_op[same_op != query_ep]

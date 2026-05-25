@@ -1,24 +1,28 @@
 base_config: configs/train_lowm_cophy_omc.yaml
-sweep_dir: runs/cophy_omc/BallsCF_omc_ablation
+sweep_dir: runs/cophy_omc/ballsCF_segm_debug
+
+# Debug sweep: seed 0, 5 epochs. For full runs, set sweep_dir to a full
+# directory, epochs to 30, train_samples_per_epoch to 5000, and duplicate each
+# variant for seeds 1 and 2.
 
 overrides:
   data:
-    root: data/cophy_omc/BallsCF
+    root: data/cophy_omc/ballsCF
     train_split: train.npz
     val_split: val.npz
     test_split: test.npz
     generate_if_missing: false
     dataset: CoPhy
-    scenario: BallsCF
-    mode: state
+    scenario: ballsCF
+    mode: segm_features
   training:
-    output_dir: runs/cophy_omc/BallsCF_omc_ablation/runs
-    epochs: 30
-    train_samples_per_epoch: 5000
-    val_samples: 1000
+    output_dir: runs/cophy_omc/ballsCF_segm_debug/runs
+    epochs: 5
+    train_samples_per_epoch: 1000
+    val_samples: 500
     selection_metric: law_pair
   evaluation:
-    num_samples: 1000
+    num_samples: 500
 
 evaluation:
   enabled: true
@@ -27,14 +31,14 @@ evaluation:
     - test
   ranking_checkpoint: best_law_pair.pt
   law_checkpoint: best_law_pair.pt
-  num_samples: 1000
+  num_samples: 500
   batch_size: 64
   device: auto
   cophy_ranking: true
   cophy:
-    scenario: BallsCF
+    scenario: ballsCF
     checkpoint: best_law_pair.pt
-    num_samples: 1000
+    num_samples: 500
     batch_size: 64
     matrix_size: 16
     max_batches: 8
@@ -44,8 +48,8 @@ variants:
     variant: lowm_cophy_OMC
     model_type: lowm
     seed: 0
-    scenario: BallsCF
-    mode: state
+    scenario: ballsCF
+    mode: segm_features
     negative_set: all
     selection_metric: law_pair
     negative_types:
@@ -53,34 +57,26 @@ variants:
       - temporal_shuffled
       - law_mismatch
       - random_impossible
-  - <<: *lowm_omc_seed0
-    seed: 1
-  - <<: *lowm_omc_seed0
-    seed: 2
 
   - &lowm_no_law_seed0
     variant: lowm_cophy_no_law_mismatch
     model_type: lowm
     seed: 0
-    scenario: BallsCF
-    mode: state
+    scenario: ballsCF
+    mode: segm_features
     negative_set: no_law_mismatch
     selection_metric: law_pair
     negative_types:
       - state_corrupted
       - temporal_shuffled
       - random_impossible
-  - <<: *lowm_no_law_seed0
-    seed: 1
-  - <<: *lowm_no_law_seed0
-    seed: 2
 
   - &direct_omc_seed0
     variant: direct_context_cophy_OMC
     model_type: direct_context_energy
     seed: 0
-    scenario: BallsCF
-    mode: state
+    scenario: ballsCF
+    mode: segm_features
     negative_set: all
     selection_metric: law_pair
     negative_types:
@@ -88,24 +84,16 @@ variants:
       - temporal_shuffled
       - law_mismatch
       - random_impossible
-  - <<: *direct_omc_seed0
-    seed: 1
-  - <<: *direct_omc_seed0
-    seed: 2
 
   - &direct_no_law_seed0
     variant: direct_context_cophy_no_law_mismatch
     model_type: direct_context_energy
     seed: 0
-    scenario: BallsCF
-    mode: state
+    scenario: ballsCF
+    mode: segm_features
     negative_set: no_law_mismatch
     selection_metric: law_pair
     negative_types:
       - state_corrupted
       - temporal_shuffled
       - random_impossible
-  - <<: *direct_no_law_seed0
-    seed: 1
-  - <<: *direct_no_law_seed0
-    seed: 2

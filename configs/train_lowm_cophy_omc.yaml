@@ -1,18 +1,18 @@
 seed: 0
 
 data:
-  root: data/cophy_omc/BallsCF
+  root: data/cophy_omc/ballsCF
   train_split: train.npz
   val_split: val.npz
   test_split: test.npz
   generate_if_missing: false
   dataset: CoPhy
-  scenario: BallsCF
-  mode: state
+  scenario: ballsCF
+  mode: segm_features
 
 ranking:
   K: 8
-  H: 6
+  H: 19
   M: 5
   seed: 123
   min_law_param_distance: 0.15
@@ -38,15 +38,15 @@ model:
 training:
   seed: 0
   output_dir: runs/cophy_omc
-  run_name: lowm_cophy_omc_seed0
+  run_name: lowm_cophy_segm_omc_seed0
   device: auto
-  epochs: 30
+  epochs: 5
   batch_size: 64
   lr: 0.001
   weight_decay: 0.0001
   num_workers: 0
-  train_samples_per_epoch: 5000
-  val_samples: 1000
+  train_samples_per_epoch: 1000
+  val_samples: 500
   beta_kl: 0.0001
   alpha_stable: 0.1
   use_stability: true
@@ -54,4 +54,4 @@ training:
   selection_metric: law_pair
 
 evaluation:
-  num_samples: 1000
+  num_samples: 500

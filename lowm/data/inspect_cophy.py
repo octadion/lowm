@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 
-KNOWN_SCENARIOS = ("BlocktowerCF", "BallsCF", "CollisionCF")
+KNOWN_SCENARIOS = ("BlocktowerCF", "BallsCF", "CollisionCF", "blocktowerCF", "ballsCF", "collisionCF")
 SPLIT_NAMES = ("train", "val", "valid", "validation", "test")
 STATE_KEYS = ("states", "object_states", "objects", "features", "trajectories", "object_features")
 CONFOUNDER_KEYS = ("op_id", "confounder_id", "operator_id", "world_id", "physical_id")
@@ -18,6 +18,14 @@ PARAM_KEYS = ("op_params", "confounders", "physical_params", "params", "properti
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".gif"}
 ARRAY_SUFFIXES = {".npz", ".npy", ".h5", ".hdf5", ".pkl", ".pickle"}
+ORIGINAL_REQUIRED = (
+    "confounders.npy",
+    "explanations.txt",
+    "ab/rgb.mp4",
+    "ab/segm.mp4",
+    "cd/rgb.mp4",
+    "cd/segm.mp4",
+)
 
 
 def _jsonable(value: Any) -> Any:
@@ -52,11 +60,58 @@ def _safe_npz_summary(path: Path) -> dict[str, Any]:
     return summary
 
 
+def _safe_npy_summary(path: Path) -> dict[str, Any]:
+    summary: dict[str, Any] = {"path": str(path)}
+    try:
+        arr = np.load(path, allow_pickle=False)
+        summary.update({"shape": list(arr.shape), "dtype": str(arr.dtype)})
+        if arr.size:
+            summary["example"] = arr.reshape(-1, arr.shape[-1] if arr.ndim > 1 else 1)[:3].tolist()
+    except Exception as exc:
+        summary["error"] = str(exc)
+    return summary
+
+
 def _scenario_dirs(root: Path) -> list[Path]:
     dirs = [root / name for name in KNOWN_SCENARIOS if (root / name).exists()]
     if dirs:
         return dirs
     return [path for path in root.iterdir() if path.is_dir()] if root.exists() else []
+
+
+def _episode_dirs(scenario_dir: Path) -> list[Path]:
+    out: list[Path] = []
+    for confounders in scenario_dir.rglob("confounders.npy"):
+        episode = confounders.parent
+        if (episode / "ab").exists() and (episode / "cd").exists():
+            out.append(episode)
+    return sorted(set(out))
+
+
+def _original_structure_report(root: Path, scenario_dir: Path) -> dict[str, Any]:
+    episodes = _episode_dirs(scenario_dir)
+    object_count_dirs = sorted(path.name for path in scenario_dir.iterdir() if path.is_dir())
+    counts = {name: 0 for name in ORIGINAL_REQUIRED}
+    confounder_examples = []
+    for episode in episodes:
+        for required in ORIGINAL_REQUIRED:
+            counts[required] += int((episode / required).exists())
+        if len(confounder_examples) < 3 and (episode / "confounders.npy").exists():
+            confounder_examples.append(_safe_npy_summary(episode / "confounders.npy"))
+    has_segmentation = counts["ab/segm.mp4"] > 0 and counts["cd/segm.mp4"] > 0
+    has_rgb = counts["ab/rgb.mp4"] > 0 and counts["cd/rgb.mp4"] > 0
+    return {
+        "detected": bool(episodes),
+        "object_count_folders": object_count_dirs,
+        "num_episode_folders": len(episodes),
+        "episode_examples": [_relative(path, root) for path in episodes[:5]],
+        "required_file_counts": counts,
+        "confounders_examples": confounder_examples,
+        "has_segmentation_videos": has_segmentation,
+        "has_rgb_videos": has_rgb,
+        "has_confounders_npy": counts["confounders.npy"] > 0,
+        "recommended_mode": "segm_features" if has_segmentation else "rgb_features" if has_rgb else "unavailable",
+    }
 
 
 def _split_files(scenario_dir: Path) -> dict[str, list[Path]]:
@@ -91,6 +146,7 @@ def _scenario_report(root: Path, scenario_dir: Path) -> dict[str, Any]:
     image_count = sum(1 for path in files if path.suffix.lower() in IMAGE_SUFFIXES)
     video_count = sum(1 for path in files if path.suffix.lower() in VIDEO_SUFFIXES)
     npz_examples = [_safe_npz_summary(path) for path in array_files if path.suffix.lower() == ".npz"][:3]
+    original = _original_structure_report(root, scenario_dir)
     keys = set()
     shapes: dict[str, Any] = {}
     for example in npz_examples:
@@ -99,11 +155,14 @@ def _scenario_report(root: Path, scenario_dir: Path) -> dict[str, Any]:
         for key, value in example.get("arrays", {}).items():
             shapes[key] = value
     has_state = any(key in keys for key in STATE_KEYS)
-    has_confounder = any(key in keys for key in CONFOUNDER_KEYS)
+    has_confounder = any(key in keys for key in CONFOUNDER_KEYS) or bool(original["has_confounders_npy"])
     has_params = any(key in keys for key in PARAM_KEYS)
     states_shape = next((shapes[key]["shape"] for key in STATE_KEYS if key in shapes), None)
     trajectory_length = int(states_shape[1]) if states_shape and len(states_shape) >= 2 else None
-    mode = "state/object-level LOWM" if has_state and (has_confounder or has_params) else "feature-level LOWM" if has_state else "visual encoder mode"
+    if original["detected"]:
+        mode = str(original["recommended_mode"])
+    else:
+        mode = "state/object-level LOWM" if has_state and (has_confounder or has_params) else "feature-level LOWM" if has_state else "visual encoder mode"
     feasibility = {
         "state_object_level_lowm": bool(has_state and (has_confounder or has_params)),
         "feature_level_lowm": bool(has_state),
@@ -122,8 +181,13 @@ def _scenario_report(root: Path, scenario_dir: Path) -> dict[str, Any]:
         "has_confounder_or_operator_metadata": bool(has_confounder or has_params),
         "trajectory_length": trajectory_length,
         "intervention_counterfactual_structure": "unknown_from_filesystem_audit",
-        "feasibility": feasibility,
+        "feasibility": {
+            **feasibility,
+            "segm_features": bool(original["has_segmentation_videos"]),
+            "rgb_features": bool(original["has_rgb_videos"]),
+        },
         "recommended_first_mode": mode,
+        "original_cophy_structure": original,
     }
 
 
@@ -146,8 +210,8 @@ def _missing_report(root: Path) -> dict[str, Any]:
             ],
         },
         "raw_visual_only": {
-            "layout": "<cophy_root>/<scenario>/<split>/... image or video files plus metadata",
-            "status": "inspection supported; conversion requires provided state/object/features or precomputed encoder features",
+            "layout": "<cophy_root>/<scenario>/<num_objects>/<episode_id>/{confounders.npy,explanations.txt,ab/rgb.mp4,ab/segm.mp4,cd/rgb.mp4,cd/segm.mp4}",
+            "status": "inspection and segm_features/rgb_features conversion supported; confounders are metadata only",
         },
     }
     return {
@@ -172,8 +236,14 @@ def inspect_cophy(root: Path, out_dir: Path) -> dict[str, Any]:
             "known_scenarios": list(KNOWN_SCENARIOS),
             "scenarios": scenarios,
             "recommended_mode_for_first_run": next(
-                (scenario["recommended_first_mode"] for scenario in scenarios if scenario["feasibility"]["state_object_level_lowm"]),
-                "feature-level LOWM if features are present; otherwise provide encoder features before training",
+                (scenario["recommended_first_mode"] for scenario in scenarios if scenario["feasibility"].get("segm_features")),
+                next(
+                    (scenario["recommended_first_mode"] for scenario in scenarios if scenario["feasibility"].get("rgb_features")),
+                    next(
+                        (scenario["recommended_first_mode"] for scenario in scenarios if scenario["feasibility"]["state_object_level_lowm"]),
+                        "feature-level LOWM if features are present; otherwise provide encoder features before training",
+                    ),
+                ),
             ),
             "expected_format": _missing_report(root)["expected_format"],
         }
@@ -200,7 +270,11 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
                 "- Required arrays: `states`/`object_states`/`features` and `op_id`/`confounder_id`/`operator_id`.",
                 "- Optional arrays: `actions`, `mask`, `op_params`/`confounders`/`physical_params`, `num_objects`, `sample_id`.",
                 "",
-                "Raw visual-only directories are inspectable but not directly converted in this milestone; provide object states or encoder features first.",
+                "Expected original video layout:",
+                "- `<cophy_root>/<scenario>/<num_objects>/<episode_id>/confounders.npy`",
+                "- `<cophy_root>/<scenario>/<num_objects>/<episode_id>/ab/rgb.mp4` and `ab/segm.mp4`",
+                "- `<cophy_root>/<scenario>/<num_objects>/<episode_id>/cd/rgb.mp4` and `cd/segm.mp4`",
+                "- Use `--mode segm_features` when segmentation videos are present.",
             ]
         )
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -223,6 +297,18 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
                 f"- Recommended mode: {scenario.get('recommended_first_mode')}",
             ]
         )
+        original = scenario.get("original_cophy_structure", {})
+        if original.get("detected"):
+            lines.extend(
+                [
+                    f"- Original CoPhy object-count folders: {original.get('object_count_folders')}",
+                    f"- Original CoPhy episode folders: {original.get('num_episode_folders')}",
+                    f"- Required video/metadata counts: {original.get('required_file_counts')}",
+                    f"- Segmentation videos available: {original.get('has_segmentation_videos')}",
+                    f"- RGB videos available: {original.get('has_rgb_videos')}",
+                    f"- Confounders examples: {original.get('confounders_examples')}",
+                ]
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
