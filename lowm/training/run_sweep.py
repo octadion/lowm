@@ -13,6 +13,8 @@ import yaml
 
 from lowm.eval.evaluate_all import evaluate_run
 from lowm.eval.ebtwm_inference import evaluate_ebtwm_inference
+from lowm.eval.evaluate_coherence_stratification import evaluate_coherence_stratification
+from lowm.eval.evaluate_energy_matrix import evaluate_energy_matrix
 from lowm.eval.evaluate_law_mismatch_only import evaluate_law_mismatch_only
 from lowm.eval.evaluate_occl_alignment import evaluate_occl_alignment
 from lowm.training.train_baseline import train_baseline
@@ -161,7 +163,11 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
     law_checkpoint = str(eval_cfg.get("law_checkpoint", "best_law_pair.pt"))
     occl_checkpoint = str(eval_cfg.get("occl_checkpoint", "best_occl_acc.pt"))
     run_ebtwm = bool(eval_cfg.get("ebtwm_inference", False))
+    run_coherence = bool(eval_cfg.get("coherence_stratification", False))
+    run_energy_matrix = bool(eval_cfg.get("energy_matrix", False))
     ebtwm_cfg = dict(eval_cfg.get("ebtwm", {}))
+    coherence_cfg = dict(eval_cfg.get("coherence", {}))
+    energy_matrix_cfg = dict(eval_cfg.get("energy_matrix_config", {}))
     evaluate = bool(eval_cfg.get("enabled", True))
 
     configs_dir = sweep_dir / "configs"
@@ -189,6 +195,27 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
             for eval_split in splits:
                 evaluate_run(run_dir, split=eval_split, checkpoint_name=ranking_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
                 evaluate_law_mismatch_only(run_dir, split=eval_split, checkpoint_name=law_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
+                if run_coherence:
+                    evaluate_coherence_stratification(
+                        run_dir,
+                        split=eval_split,
+                        checkpoint_name=str(coherence_cfg.get("checkpoint", ranking_checkpoint)),
+                        num_samples=coherence_cfg.get("num_samples", eval_num_samples),
+                        batch_size=coherence_cfg.get("batch_size", eval_batch_size),
+                        seed=coherence_cfg.get("seed"),
+                        device_name=device,
+                    )
+                if run_energy_matrix:
+                    evaluate_energy_matrix(
+                        run_dir,
+                        split=eval_split,
+                        checkpoint_name=str(energy_matrix_cfg.get("checkpoint", ranking_checkpoint)),
+                        matrix_size=int(energy_matrix_cfg.get("matrix_size", 16)),
+                        max_batches=int(energy_matrix_cfg.get("max_batches", 8)),
+                        num_samples=energy_matrix_cfg.get("num_samples"),
+                        seed=energy_matrix_cfg.get("seed"),
+                        device_name=device,
+                    )
                 if model_type == "lowm":
                     evaluate_occl_alignment(run_dir, split=eval_split, checkpoint_name=occl_checkpoint, num_samples=eval_num_samples, batch_size=eval_batch_size, device_name=device)
                 if run_ebtwm and model_type == "lowm":

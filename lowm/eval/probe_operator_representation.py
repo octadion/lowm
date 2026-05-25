@@ -133,6 +133,8 @@ def _fit_linear_classifier(
             "train_accuracy": 1.0,
             "classes": classes.astype(int).tolist(),
             "confusion": np.asarray([[len(test_idx)]], dtype=np.int64),
+            "correct_count": int(len(test_idx)),
+            "test_count": int(len(test_idx)),
         }
 
     torch.manual_seed(seed)
@@ -158,6 +160,76 @@ def _fit_linear_classifier(
         "train_accuracy": float(np.mean(train_pred == y_train)) if len(y_train) else 0.0,
         "classes": classes.astype(int).tolist(),
         "confusion": confusion,
+        "correct_count": int(np.sum(test_pred == y_test)),
+        "test_count": int(len(y_test)),
+    }
+
+
+class _MLPProbe(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+def _fit_mlp_classifier(
+    x: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    seed: int,
+    hidden_dim: int,
+    epochs: int,
+    lr: float,
+) -> dict[str, Any]:
+    classes = np.unique(y)
+    class_to_idx = {int(label): idx for idx, label in enumerate(classes)}
+    y_mapped = np.asarray([class_to_idx[int(label)] for label in y], dtype=np.int64)
+    x_train, x_test, _, _ = _standardize(x[train_idx], x[test_idx])
+    y_train = y_mapped[train_idx]
+    y_test = y_mapped[test_idx]
+
+    if len(classes) == 1:
+        return {
+            "accuracy": 1.0,
+            "train_accuracy": 1.0,
+            "classes": classes.astype(int).tolist(),
+            "confusion": np.asarray([[len(test_idx)]], dtype=np.int64),
+            "correct_count": int(len(test_idx)),
+            "test_count": int(len(test_idx)),
+        }
+
+    torch.manual_seed(seed)
+    model = _MLPProbe(x.shape[1], len(classes), hidden_dim)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=1e-4)
+    x_train_t = torch.from_numpy(x_train.astype(np.float32))
+    y_train_t = torch.from_numpy(y_train)
+    x_test_t = torch.from_numpy(x_test.astype(np.float32))
+    for _ in range(max(1, int(epochs))):
+        optimizer.zero_grad(set_to_none=True)
+        loss = nn.functional.cross_entropy(model(x_train_t), y_train_t)
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        train_pred = model(x_train_t).argmax(dim=1).cpu().numpy()
+        test_pred = model(x_test_t).argmax(dim=1).cpu().numpy()
+    confusion = np.zeros((len(classes), len(classes)), dtype=np.int64)
+    for target, pred in zip(y_test, test_pred):
+        confusion[int(target), int(pred)] += 1
+    return {
+        "accuracy": float(np.mean(test_pred == y_test)) if len(y_test) else 0.0,
+        "train_accuracy": float(np.mean(train_pred == y_train)) if len(y_train) else 0.0,
+        "classes": classes.astype(int).tolist(),
+        "confusion": confusion,
+        "correct_count": int(np.sum(test_pred == y_test)),
+        "test_count": int(len(y_test)),
     }
 
 
@@ -182,6 +254,51 @@ def _fit_ridge_regression(
     except np.linalg.LinAlgError:
         weights = np.linalg.pinv(lhs) @ rhs
     pred = x_test_aug @ weights
+    mse_per_dim = np.mean((pred - y_test) ** 2, axis=0)
+    var_per_dim = np.var(y_test, axis=0)
+    r2_per_dim = np.where(var_per_dim > 1e-12, 1.0 - mse_per_dim / np.maximum(var_per_dim, 1e-12), 0.0)
+    return {
+        "pred": pred.astype(np.float32),
+        "mse": float(np.mean(mse_per_dim)),
+        "r2": float(np.mean(r2_per_dim)),
+        "mse_per_dim": mse_per_dim.astype(float).tolist(),
+        "r2_per_dim": r2_per_dim.astype(float).tolist(),
+    }
+
+
+def _fit_mlp_regression(
+    x: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    seed: int,
+    hidden_dim: int,
+    epochs: int,
+    lr: float,
+) -> dict[str, Any]:
+    x_train, x_test, _, _ = _standardize(x[train_idx], x[test_idx])
+    y_train = y[train_idx]
+    y_test = y[test_idx]
+    y_mean = y_train.mean(axis=0, keepdims=True)
+    y_std = y_train.std(axis=0, keepdims=True)
+    y_std = np.where(y_std < 1e-6, 1.0, y_std)
+    y_train_std = (y_train - y_mean) / y_std
+
+    torch.manual_seed(seed)
+    model = _MLPProbe(x.shape[1], y.shape[1], hidden_dim)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=1e-4)
+    x_train_t = torch.from_numpy(x_train.astype(np.float32))
+    y_train_t = torch.from_numpy(y_train_std.astype(np.float32))
+    x_test_t = torch.from_numpy(x_test.astype(np.float32))
+    for _ in range(max(1, int(epochs))):
+        optimizer.zero_grad(set_to_none=True)
+        loss = nn.functional.mse_loss(model(x_train_t), y_train_t)
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        pred_std = model(x_test_t).cpu().numpy()
+    pred = pred_std * y_std + y_mean
     mse_per_dim = np.mean((pred - y_test) ** 2, axis=0)
     var_per_dim = np.var(y_test, axis=0)
     r2_per_dim = np.where(var_per_dim > 1e-12, 1.0 - mse_per_dim / np.maximum(var_per_dim, 1e-12), 0.0)
@@ -219,6 +336,79 @@ def _binned_param_accuracy(y_train: np.ndarray, y_test: np.ndarray, pred: np.nda
         total_count += count
         per_dim.append(float(correct / max(1, count)))
         valid_per_dim.append(1)
+    return {
+        "accuracy": float(total_correct / max(1, total_count)),
+        "accuracy_per_dim": per_dim,
+        "valid_per_dim": valid_per_dim,
+    }
+
+
+def _bin_edges_by_dim(y_train: np.ndarray, bins: int) -> list[np.ndarray | None]:
+    edges_by_dim: list[np.ndarray | None] = []
+    for dim in range(y_train.shape[1]):
+        if len(np.unique(y_train[:, dim])) < 2:
+            edges_by_dim.append(None)
+            continue
+        quantiles = np.linspace(0, 1, int(bins) + 1)[1:-1]
+        edges = np.unique(np.quantile(y_train[:, dim], quantiles))
+        edges_by_dim.append(edges if len(edges) else None)
+    return edges_by_dim
+
+
+def _binned_labels(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    return np.digitize(values, edges).astype(np.int64)
+
+
+def _fit_binned_param_classifiers(
+    x: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    seed: int,
+    bins: int,
+    probe_kind: str,
+    hidden_dim: int,
+    epochs: int,
+    lr: float,
+) -> dict[str, Any]:
+    edges_by_dim = _bin_edges_by_dim(y[train_idx], bins)
+    per_dim: list[float] = []
+    valid_per_dim: list[int] = []
+    total_correct = 0
+    total_count = 0
+    for dim, edges in enumerate(edges_by_dim):
+        if edges is None:
+            per_dim.append(0.0)
+            valid_per_dim.append(0)
+            continue
+        train_bins = _binned_labels(y[train_idx, dim], edges)
+        test_bins = _binned_labels(y[test_idx, dim], edges)
+        if len(np.unique(train_bins)) < 2:
+            per_dim.append(0.0)
+            valid_per_dim.append(0)
+            continue
+        x_pair = np.concatenate([x[train_idx], x[test_idx]], axis=0)
+        y_pair = np.concatenate([train_bins, test_bins], axis=0)
+        pair_train_idx = np.arange(len(train_idx))
+        pair_test_idx = np.arange(len(train_idx), len(train_idx) + len(test_idx))
+        if probe_kind == "linear":
+            result = _fit_linear_classifier(x_pair, y_pair, pair_train_idx, pair_test_idx, seed + dim + 1, epochs)
+        else:
+            result = _fit_mlp_classifier(
+                x_pair,
+                y_pair,
+                pair_train_idx,
+                pair_test_idx,
+                seed + dim + 1,
+                hidden_dim,
+                epochs,
+                lr,
+            )
+        acc = float(result["accuracy"])
+        per_dim.append(acc)
+        valid_per_dim.append(1)
+        total_correct += int(result.get("correct_count", 0))
+        total_count += int(result.get("test_count", len(test_bins)))
     return {
         "accuracy": float(total_correct / max(1, total_count)),
         "accuracy_per_dim": per_dim,
@@ -288,6 +478,12 @@ def _write_probe_csv(metrics: Mapping[str, Any], path: Path) -> None:
         {"metric": "op_param_mse", "value": metrics.get("op_param_mse", 0.0)},
         {"metric": "op_param_r2", "value": metrics.get("op_param_r2", 0.0)},
         {"metric": "binned_param_accuracy", "value": metrics.get("binned_param_accuracy", 0.0)},
+        {"metric": "linear_op_id_probe_accuracy", "value": metrics.get("linear_op_id_probe_accuracy", 0.0)},
+        {"metric": "linear_op_param_r2", "value": metrics.get("linear_op_param_r2", 0.0)},
+        {"metric": "linear_binned_param_accuracy", "value": metrics.get("linear_binned_param_accuracy", 0.0)},
+        {"metric": "mlp_op_id_probe_accuracy", "value": metrics.get("mlp_op_id_probe_accuracy", 0.0)},
+        {"metric": "mlp_op_param_r2", "value": metrics.get("mlp_op_param_r2", 0.0)},
+        {"metric": "mlp_binned_param_accuracy", "value": metrics.get("mlp_binned_param_accuracy", 0.0)},
         {"metric": "op_id_silhouette", "value": metrics.get("op_id_silhouette", 0.0)},
     ]
     for name, value in zip(OP_PARAM_NAMES, metrics.get("op_param_mse_per_dim", [])):
@@ -351,10 +547,13 @@ def _write_summary(metrics: Mapping[str, Any], path: Path) -> None:
         "",
         f"- Samples: {metrics.get('num_samples', 0)}",
         f"- Representation dim: {metrics.get('embedding_dim', 0)}",
-        f"- op_id probe accuracy: {metrics.get('op_id_probe_accuracy', 0.0):.4f}",
-        f"- op_param R2: {metrics.get('op_param_r2', 0.0):.4f}",
-        f"- op_param MSE: {metrics.get('op_param_mse', 0.0):.6f}",
-        f"- binned param accuracy: {metrics.get('binned_param_accuracy', 0.0):.4f}",
+        f"- Probe type: {metrics.get('probe_type', 'linear')}",
+        f"- Linear op_id accuracy: {metrics.get('linear_op_id_probe_accuracy', 0.0):.4f}",
+        f"- Linear op_param R2: {metrics.get('linear_op_param_r2', 0.0):.4f}",
+        f"- Linear binned param accuracy: {metrics.get('linear_binned_param_accuracy', 0.0):.4f}",
+        f"- MLP op_id accuracy: {metrics.get('mlp_op_id_probe_accuracy', 0.0):.4f}",
+        f"- MLP op_param R2: {metrics.get('mlp_op_param_r2', 0.0):.4f}",
+        f"- MLP binned param accuracy: {metrics.get('mlp_binned_param_accuracy', 0.0):.4f}",
         f"- op_id silhouette: {metrics.get('op_id_silhouette', 0.0):.4f}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -369,11 +568,17 @@ def probe_operator_representation(
     num_samples: int | None = None,
     seed: int | None = None,
     device_name: str = "auto",
-    probe_epochs: int = 200,
+    probe_type: str = "linear",
+    probe_seed: int = 0,
+    probe_hidden_dim: int = 64,
+    probe_epochs: int = 100,
+    probe_lr: float = 1e-3,
     test_fraction: float = 0.3,
     ridge_alpha: float = 1e-2,
     param_bins: int = 4,
 ) -> dict[str, Any]:
+    if probe_type not in {"linear", "mlp", "both"}:
+        raise ValueError("probe_type must be one of {'linear', 'mlp', 'both'}")
     device = _resolve_device(device_name)
     checkpoint_path = _resolve_checkpoint_path(run_dir, checkpoint_name)
     model, config, detected = load_run_model(run_dir, model_type=model_type, checkpoint_name=checkpoint_name, device=device)
@@ -389,12 +594,72 @@ def probe_operator_representation(
     embeddings = collected["embeddings"]
     op_id = collected["op_id"]
     op_params = collected["op_params"]
-    split_seed = int(seed if seed is not None else ranking_cfg.seed)
+    split_seed = int(probe_seed)
     train_idx, test_idx = _stratified_split(op_id, test_fraction=test_fraction, seed=split_seed)
 
-    classifier = _fit_linear_classifier(embeddings, op_id, train_idx, test_idx, seed=split_seed, epochs=probe_epochs)
-    ridge = _fit_ridge_regression(embeddings, op_params, train_idx, test_idx, alpha=ridge_alpha)
-    binned = _binned_param_accuracy(op_params[train_idx], op_params[test_idx], ridge["pred"], bins=param_bins)
+    run_linear = probe_type in {"linear", "both"}
+    run_mlp = probe_type in {"mlp", "both"}
+    linear_classifier: dict[str, Any] | None = None
+    linear_regression: dict[str, Any] | None = None
+    linear_binned: dict[str, Any] | None = None
+    mlp_classifier: dict[str, Any] | None = None
+    mlp_regression: dict[str, Any] | None = None
+    mlp_binned: dict[str, Any] | None = None
+
+    if run_linear:
+        linear_classifier = _fit_linear_classifier(embeddings, op_id, train_idx, test_idx, seed=split_seed, epochs=probe_epochs)
+        linear_regression = _fit_ridge_regression(embeddings, op_params, train_idx, test_idx, alpha=ridge_alpha)
+        linear_binned = _fit_binned_param_classifiers(
+            embeddings,
+            op_params,
+            train_idx,
+            test_idx,
+            seed=split_seed,
+            bins=param_bins,
+            probe_kind="linear",
+            hidden_dim=probe_hidden_dim,
+            epochs=probe_epochs,
+            lr=probe_lr,
+        )
+    if run_mlp:
+        mlp_classifier = _fit_mlp_classifier(
+            embeddings,
+            op_id,
+            train_idx,
+            test_idx,
+            seed=split_seed,
+            hidden_dim=probe_hidden_dim,
+            epochs=probe_epochs,
+            lr=probe_lr,
+        )
+        mlp_regression = _fit_mlp_regression(
+            embeddings,
+            op_params,
+            train_idx,
+            test_idx,
+            seed=split_seed + 1009,
+            hidden_dim=probe_hidden_dim,
+            epochs=probe_epochs,
+            lr=probe_lr,
+        )
+        mlp_binned = _fit_binned_param_classifiers(
+            embeddings,
+            op_params,
+            train_idx,
+            test_idx,
+            seed=split_seed + 2017,
+            bins=param_bins,
+            probe_kind="mlp",
+            hidden_dim=probe_hidden_dim,
+            epochs=probe_epochs,
+            lr=probe_lr,
+        )
+
+    primary_classifier = linear_classifier if linear_classifier is not None else mlp_classifier
+    primary_regression = linear_regression if linear_regression is not None else mlp_regression
+    primary_binned = linear_binned if linear_binned is not None else mlp_binned
+    if primary_classifier is None or primary_regression is None or primary_binned is None:
+        raise ValueError("no probe metrics were produced")
     projected, pca_ratios = _pca_2d(embeddings)
     corr = _correlation_matrix(embeddings, op_params)
     silhouette = _silhouette_score(embeddings, op_id, max_samples=512, seed=split_seed)
@@ -407,20 +672,43 @@ def probe_operator_representation(
         "checkpoint_used": checkpoint_path.name,
         "checkpoint_stem": checkpoint_path.stem,
         "ranking_seed": ranking_cfg.seed,
+        "probe_type": probe_type,
+        "probe_seed": split_seed,
+        "probe_hidden_dim": int(probe_hidden_dim),
+        "probe_epochs": int(probe_epochs),
+        "probe_lr": float(probe_lr),
         "num_samples": int(len(embeddings)),
         "embedding_dim": int(embeddings.shape[1]),
         "train_samples": int(len(train_idx)),
         "test_samples": int(len(test_idx)),
-        "op_id_probe_accuracy": classifier["accuracy"],
-        "op_id_probe_train_accuracy": classifier["train_accuracy"],
-        "op_id_classes": classifier["classes"],
-        "op_param_mse": ridge["mse"],
-        "op_param_r2": ridge["r2"],
-        "op_param_mse_per_dim": ridge["mse_per_dim"],
-        "op_param_r2_per_dim": ridge["r2_per_dim"],
-        "binned_param_accuracy": binned["accuracy"],
-        "binned_param_accuracy_per_dim": binned["accuracy_per_dim"],
-        "binned_param_valid_per_dim": binned["valid_per_dim"],
+        "op_id_probe_accuracy": primary_classifier["accuracy"],
+        "op_id_probe_train_accuracy": primary_classifier["train_accuracy"],
+        "op_id_classes": primary_classifier["classes"],
+        "op_param_mse": primary_regression["mse"],
+        "op_param_r2": primary_regression["r2"],
+        "op_param_mse_per_dim": primary_regression["mse_per_dim"],
+        "op_param_r2_per_dim": primary_regression["r2_per_dim"],
+        "binned_param_accuracy": primary_binned["accuracy"],
+        "binned_param_accuracy_per_dim": primary_binned["accuracy_per_dim"],
+        "binned_param_valid_per_dim": primary_binned["valid_per_dim"],
+        "linear_op_id_probe_accuracy": linear_classifier["accuracy"] if linear_classifier else 0.0,
+        "linear_op_id_probe_train_accuracy": linear_classifier["train_accuracy"] if linear_classifier else 0.0,
+        "linear_op_param_mse": linear_regression["mse"] if linear_regression else 0.0,
+        "linear_op_param_r2": linear_regression["r2"] if linear_regression else 0.0,
+        "linear_op_param_mse_per_dim": linear_regression["mse_per_dim"] if linear_regression else [],
+        "linear_op_param_r2_per_dim": linear_regression["r2_per_dim"] if linear_regression else [],
+        "linear_binned_param_accuracy": linear_binned["accuracy"] if linear_binned else 0.0,
+        "linear_binned_param_accuracy_per_dim": linear_binned["accuracy_per_dim"] if linear_binned else [],
+        "linear_binned_param_valid_per_dim": linear_binned["valid_per_dim"] if linear_binned else [],
+        "mlp_op_id_probe_accuracy": mlp_classifier["accuracy"] if mlp_classifier else 0.0,
+        "mlp_op_id_probe_train_accuracy": mlp_classifier["train_accuracy"] if mlp_classifier else 0.0,
+        "mlp_op_param_mse": mlp_regression["mse"] if mlp_regression else 0.0,
+        "mlp_op_param_r2": mlp_regression["r2"] if mlp_regression else 0.0,
+        "mlp_op_param_mse_per_dim": mlp_regression["mse_per_dim"] if mlp_regression else [],
+        "mlp_op_param_r2_per_dim": mlp_regression["r2_per_dim"] if mlp_regression else [],
+        "mlp_binned_param_accuracy": mlp_binned["accuracy"] if mlp_binned else 0.0,
+        "mlp_binned_param_accuracy_per_dim": mlp_binned["accuracy_per_dim"] if mlp_binned else [],
+        "mlp_binned_param_valid_per_dim": mlp_binned["valid_per_dim"] if mlp_binned else [],
         "op_id_silhouette": silhouette,
         "pca_explained_variance_ratio": pca_ratios,
     }
@@ -433,7 +721,11 @@ def probe_operator_representation(
         json.dump(metrics, f, indent=2, sort_keys=True)
     _write_probe_csv(metrics, out_dir / "probe_results.csv")
     _plot_pca(projected, op_id, pca_ratios, out_dir / "pca_lambda.png")
-    _plot_confusion(classifier["confusion"], classifier["classes"], out_dir / "op_id_confusion.png")
+    _plot_confusion(primary_classifier["confusion"], primary_classifier["classes"], out_dir / "op_id_confusion.png")
+    if linear_classifier is not None:
+        _plot_confusion(linear_classifier["confusion"], linear_classifier["classes"], out_dir / "linear_op_id_confusion.png")
+    if mlp_classifier is not None:
+        _plot_confusion(mlp_classifier["confusion"], mlp_classifier["classes"], out_dir / "mlp_op_id_confusion.png")
     _plot_correlation(corr, out_dir / "lambda_param_correlation.png")
     _write_summary(metrics, out_dir / "probe_summary.md")
     return metrics
@@ -449,7 +741,11 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--probe-epochs", type=int, default=200)
+    parser.add_argument("--probe-type", type=str, default="linear", choices=["linear", "mlp", "both"])
+    parser.add_argument("--probe-seed", type=int, default=0)
+    parser.add_argument("--probe-hidden-dim", type=int, default=64)
+    parser.add_argument("--probe-epochs", type=int, default=100)
+    parser.add_argument("--probe-lr", type=float, default=1e-3)
     parser.add_argument("--test-fraction", type=float, default=0.3)
     parser.add_argument("--ridge-alpha", type=float, default=1e-2)
     parser.add_argument("--param-bins", type=int, default=4)
@@ -463,7 +759,11 @@ def main() -> None:
         num_samples=args.num_samples,
         seed=args.seed,
         device_name=args.device,
+        probe_type=args.probe_type,
+        probe_seed=args.probe_seed,
+        probe_hidden_dim=args.probe_hidden_dim,
         probe_epochs=args.probe_epochs,
+        probe_lr=args.probe_lr,
         test_fraction=args.test_fraction,
         ridge_alpha=args.ridge_alpha,
         param_bins=args.param_bins,
@@ -475,6 +775,12 @@ def main() -> None:
                 "op_param_r2": metrics["op_param_r2"],
                 "op_param_mse": metrics["op_param_mse"],
                 "binned_param_accuracy": metrics["binned_param_accuracy"],
+                "linear_op_id_probe_accuracy": metrics["linear_op_id_probe_accuracy"],
+                "mlp_op_id_probe_accuracy": metrics["mlp_op_id_probe_accuracy"],
+                "linear_binned_param_accuracy": metrics["linear_binned_param_accuracy"],
+                "mlp_binned_param_accuracy": metrics["mlp_binned_param_accuracy"],
+                "linear_op_param_r2": metrics["linear_op_param_r2"],
+                "mlp_op_param_r2": metrics["mlp_op_param_r2"],
                 "op_id_silhouette": metrics["op_id_silhouette"],
             },
             indent=2,

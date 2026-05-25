@@ -1,0 +1,74 @@
+base_config: configs/train_baselines.yaml
+sweep_dir: runs/lowm_synth_ood_param/direct_context_omc_ablation
+
+overrides:
+  data:
+    root: data/lowm_synth_ood_param
+    train_split: train.npz
+    val_split: val.npz
+    test_iid_split: test_iid.npz
+    test_ood_param_split: test_ood_param.npz
+    generate_if_missing: true
+    dataset_config: configs/lowm_synth_ood_param.yaml
+  training:
+    output_dir: runs/lowm_synth_ood_param/direct_context_omc_ablation/runs
+    baseline: direct_context_energy
+    epochs: 30
+    train_samples_per_epoch: 5000
+    val_samples: 1000
+    selection_metric: law_pair
+  evaluation:
+    num_samples: 1000
+
+evaluation:
+  enabled: true
+  splits:
+    - test_iid
+    - test_ood_param
+  ranking_checkpoint: best_law_pair.pt
+  law_checkpoint: best_law_pair.pt
+  num_samples: 1000
+  batch_size: 64
+  device: auto
+  coherence_stratification: true
+  coherence:
+    checkpoint: best_law_pair.pt
+    num_samples: 1000
+    batch_size: 64
+  energy_matrix: true
+  energy_matrix_config:
+    checkpoint: best_law_pair.pt
+    matrix_size: 16
+    max_batches: 8
+
+variants:
+  - &direct_context_no_law_seed0
+    variant: direct_context_no_law_mismatch
+    model_type: direct_context_energy
+    seed: 0
+    negative_set: no_law_mismatch
+    selection_metric: law_pair
+    negative_types:
+      - state_corrupted
+      - temporal_shuffled
+      - random_impossible
+  - <<: *direct_context_no_law_seed0
+    seed: 1
+  - <<: *direct_context_no_law_seed0
+    seed: 2
+
+  - &direct_context_omc_seed0
+    variant: direct_context_OMC
+    model_type: direct_context_energy
+    seed: 0
+    negative_set: all
+    selection_metric: law_pair
+    negative_types:
+      - state_corrupted
+      - temporal_shuffled
+      - law_mismatch
+      - random_impossible
+  - <<: *direct_context_omc_seed0
+    seed: 1
+  - <<: *direct_context_omc_seed0
+    seed: 2
