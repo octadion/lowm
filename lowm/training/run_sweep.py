@@ -14,6 +14,7 @@ import yaml
 from lowm.eval.evaluate_all import evaluate_run
 from lowm.eval.ebtwm_inference import evaluate_ebtwm_inference
 from lowm.eval.evaluate_coherence_stratification import evaluate_coherence_stratification
+from lowm.eval.evaluate_cophy_ranking import evaluate_cophy_ranking
 from lowm.eval.evaluate_energy_matrix import evaluate_energy_matrix
 from lowm.eval.evaluate_law_mismatch_only import evaluate_law_mismatch_only
 from lowm.eval.evaluate_occl_alignment import evaluate_occl_alignment
@@ -38,7 +39,7 @@ SWEEP_TO_CONFIG_PATH = {
     "use_grad_reg": ("training", "use_grad_reg"),
     "alpha_grad_reg": ("training", "alpha_grad_reg"),
 }
-METADATA_ONLY_PARAMS = {"negative_set", "component", "name", "variant", "model_type"}
+METADATA_ONLY_PARAMS = {"negative_set", "component", "name", "variant", "model_type", "scenario", "mode"}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -165,9 +166,11 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
     run_ebtwm = bool(eval_cfg.get("ebtwm_inference", False))
     run_coherence = bool(eval_cfg.get("coherence_stratification", False))
     run_energy_matrix = bool(eval_cfg.get("energy_matrix", False))
+    run_cophy = bool(eval_cfg.get("cophy_ranking", False))
     ebtwm_cfg = dict(eval_cfg.get("ebtwm", {}))
     coherence_cfg = dict(eval_cfg.get("coherence", {}))
     energy_matrix_cfg = dict(eval_cfg.get("energy_matrix_config", {}))
+    cophy_cfg = dict(eval_cfg.get("cophy", {}))
     evaluate = bool(eval_cfg.get("enabled", True))
 
     configs_dir = sweep_dir / "configs"
@@ -214,6 +217,19 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
                         max_batches=int(energy_matrix_cfg.get("max_batches", 8)),
                         num_samples=energy_matrix_cfg.get("num_samples"),
                         seed=energy_matrix_cfg.get("seed"),
+                        device_name=device,
+                    )
+                if run_cophy:
+                    evaluate_cophy_ranking(
+                        run_dir,
+                        split=eval_split,
+                        scenario=cophy_cfg.get("scenario"),
+                        checkpoint_name=str(cophy_cfg.get("checkpoint", ranking_checkpoint)),
+                        num_samples=cophy_cfg.get("num_samples", eval_num_samples),
+                        batch_size=cophy_cfg.get("batch_size", eval_batch_size),
+                        seed=cophy_cfg.get("seed"),
+                        matrix_size=int(cophy_cfg.get("matrix_size", 16)),
+                        max_batches=int(cophy_cfg.get("max_batches", 8)),
                         device_name=device,
                     )
                 if model_type == "lowm":
