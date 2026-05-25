@@ -5,6 +5,7 @@ import yaml
 
 from lowm.data.generate_dataset import generate_dataset
 from lowm.eval.aggregate_p1_backbone_omc import aggregate_p1_backbone_omc
+from lowm.eval.aggregate_paper1_current import aggregate_paper1_current
 from lowm.eval.evaluate_coherence_stratification import evaluate_coherence_stratification
 from lowm.eval.evaluate_energy_matrix import evaluate_energy_matrix
 from lowm.eval.probe_operator_representation import probe_operator_representation
@@ -176,6 +177,91 @@ def _write_backbone_eval(run: Path, split: str, top1: float, law_pair: float, la
     )
 
 
+def _write_current_run(root: Path, name: str, model_type: str, variant: str, objective: str, seed: int) -> Path:
+    run = root / "runs" / name
+    run.mkdir(parents=True, exist_ok=True)
+    negative_types = ["state_corrupted", "temporal_shuffled", "random_impossible"]
+    if objective == "OMC":
+        negative_types.insert(2, "law_mismatch")
+    config = {
+        "sweep_params": {
+            "variant": variant,
+            "model_type": model_type,
+            "seed": seed,
+            "negative_set": "all" if objective == "OMC" else "no_law_mismatch",
+            "negative_types": negative_types,
+        },
+        "ranking": {"negative_types": negative_types},
+        "model": {"lambda_dim": 8} if model_type == "lowm" else {"hidden_dim": 32},
+        "training": {"seed": seed, "baseline": model_type if model_type != "lowm" else None},
+    }
+    (run / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    return run
+
+
+def _write_current_eval(
+    run: Path,
+    split: str,
+    model_type: str,
+    top1: float,
+    law_pair: float,
+    law_gap: float,
+    law_only: float,
+    write_probe: bool = True,
+    write_energy: bool = True,
+) -> None:
+    eval_dir = run / "eval" / split / "best_law_pair"
+    _write_json(
+        eval_dir / "eval_summary.json",
+        {
+            "model_type": model_type,
+            "checkpoint_used": "best_law_pair.pt",
+            "split": split,
+            "ranking": {"top1_acc": top1, "law_pair": law_pair, "law_gap": law_gap, "mean_rank": 2.0, "mrr": 0.5},
+            "retrieval": {},
+            "occl_alignment": {},
+        },
+    )
+    (eval_dir / "negative_type_breakdown.csv").write_text(
+        "negative_type,pairwise_acc,mean_energy_gap,count,top1_acc_on_samples_with_type\n"
+        f"law_mismatch,{law_pair},{law_gap},10,{top1}\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run / "eval" / split / "law_mismatch_only_best_law_pair" / "law_mismatch_only_metrics.json",
+        {"law_only_top1": law_only, "pairwise_acc_law_only": law_pair, "mean_law_gap": law_gap},
+    )
+    _write_json(
+        run / "eval" / split / "coherence_stratification" / "metrics.json",
+        {
+            "fraction_same_lt_wrong": law_pair,
+            "fraction_same_lt_wrong_lt_noise": law_pair - 0.1,
+            "gap_same_wrong": law_gap,
+        },
+    )
+    if write_energy:
+        _write_json(
+            run / "eval" / split / "energy_matrix" / "metrics.json",
+            {
+                "mrr": 0.4 + 0.1 * law_pair,
+                "diagonal_top1_accuracy": law_pair,
+                "diagonal_vs_offdiag_gap": law_gap,
+            },
+        )
+    if write_probe:
+        _write_json(
+            run / "eval" / split / "operator_probe" / "metrics.json",
+            {
+                "linear_op_id_probe_accuracy": 0.45,
+                "mlp_op_id_probe_accuracy": 0.46,
+                "linear_binned_param_accuracy": 0.35,
+                "mlp_binned_param_accuracy": 0.34,
+                "linear_op_param_r2": 0.05,
+                "mlp_op_param_r2": 0.04,
+            },
+        )
+
+
 def test_direct_context_omc_sweep_dry_run_and_aggregation(tmp_path: Path) -> None:
     base = tmp_path / "base.yaml"
     base.write_text(
@@ -248,3 +334,42 @@ def test_direct_context_omc_sweep_dry_run_and_aggregation(tmp_path: Path) -> Non
     assert (out / "backbone_omc_summary.csv").exists()
     assert (out / "backbone_omc_summary.md").exists()
     assert (out / "backbone_omc_runs.csv").exists()
+
+
+def test_aggregate_paper1_current_outputs_tables_and_tolerates_missing_files(tmp_path: Path) -> None:
+    lowm_root = tmp_path / "lowm_main"
+    direct_root = tmp_path / "direct_context"
+    lowm_omc = _write_current_run(lowm_root, "lowm_omc_seed0", "lowm", "lowm_omc", "OMC", 0)
+    lowm_no = _write_current_run(lowm_root, "lowm_no_law_seed0", "lowm", "no_law_mismatch", "no_law_mismatch", 0)
+    direct_omc = _write_current_run(direct_root, "direct_context_OMC_seed0", "direct_context_energy", "direct_context_OMC", "OMC", 0)
+    direct_no = _write_current_run(
+        direct_root,
+        "direct_context_no_law_mismatch_seed0",
+        "direct_context_energy",
+        "direct_context_no_law_mismatch",
+        "no_law_mismatch",
+        0,
+    )
+    _write_json(lowm_root / "manifest.json", {"runs": [str(lowm_omc), str(lowm_no)]})
+    _write_json(direct_root / "manifest.json", {"runs": [str(direct_omc), str(direct_no)]})
+
+    for split in ["test_iid", "test_ood_param"]:
+        _write_current_eval(lowm_omc, split, "lowm", 0.98, 0.74, 2.1, 0.42)
+        _write_current_eval(lowm_no, split, "lowm", 0.99, 0.50, 0.1, 0.21, write_probe=False)
+        _write_current_eval(direct_omc, split, "direct_context_energy", 0.96, 0.70, 1.8, 0.40)
+        _write_current_eval(direct_no, split, "direct_context_energy", 0.95, 0.52, 0.2, 0.22, write_energy=False)
+
+    out = tmp_path / "paper1_current"
+    summary = aggregate_paper1_current(lowm_root, direct_root, out)
+    assert len(summary) == 8
+    assert (out / "paper1_current_summary.md").exists()
+    assert (out / "paper1_current_summary.csv").exists()
+    assert (out / "table_operator_blindness.md").exists()
+    assert (out / "table_coherence_stratification.md").exists()
+    assert (out / "table_energy_matrix.md").exists()
+    assert (out / "table_probe.md").exists()
+    checklist = out / "claim_checklist.md"
+    assert checklist.exists()
+    text = checklist.read_text(encoding="utf-8")
+    assert "Not claimed" in text
+    assert "LOWM-G is intentionally excluded" in text
