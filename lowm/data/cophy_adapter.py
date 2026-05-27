@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,15 @@ class CoPhyAdapterConfig:
     nmax: int = 9
     split_seed: int = 0
     background_threshold: int = 8
+    object_counts: tuple[int, ...] | None = None
+    progress_every: int = 100
+    save_shards: bool = False
+    shard_size: int = 1000
+    resume: bool = False
+    skip_existing: bool = False
+    num_workers: int = 1
+    no_final_merge: bool = False
+    force_full: bool = False
 
 
 @dataclass(frozen=True)
@@ -436,16 +447,12 @@ def _episode_features(ep: OriginalEpisode, config: CoPhyAdapterConfig) -> dict[s
 
 
 def _hash_confounders(confounders: np.ndarray) -> np.ndarray:
+    if confounders.shape[0] == 0:
+        return np.zeros((0,), dtype=np.int64)
     return _hash_rows(confounders.reshape(confounders.shape[0], -1))
 
 
-def _write_original_split(
-    out_path: Path,
-    records: list[dict[str, Any]],
-    scenario_id: int,
-) -> dict[str, Any]:
-    if not records:
-        return {"num_episodes": 0, "output": str(out_path), "skipped": True}
+def _records_to_original_arrays(records: list[dict[str, Any]], scenario_id: int) -> dict[str, np.ndarray]:
     context_states = np.stack([record["context_states"] for record in records]).astype(np.float32)
     positive_states = np.stack([record["positive_states"] for record in records]).astype(np.float32)
     context_mask = np.stack([record["context_mask"] for record in records]).astype(np.float32)
@@ -457,27 +464,55 @@ def _write_original_split(
     actions = np.zeros((positive_states.shape[0], positive_states.shape[1] - 1, positive_states.shape[2], 2), dtype=np.float32)
     context_actions = np.zeros_like(actions)
     source_sample_id = np.arange(positive_states.shape[0], dtype=np.int64)
-    np.savez_compressed(
-        out_path,
-        context_states=context_states,
-        positive_states=positive_states,
-        states=positive_states,
-        context_actions=context_actions,
-        positive_actions=actions,
-        actions=actions,
-        context_mask=context_mask,
-        positive_mask=positive_mask,
-        mask=positive_mask,
-        confounders=confounders,
-        op_id=op_id,
-        op_params=op_params,
-        episode_ids=np.asarray([record["episode_id"] for record in records]),
-        source_paths=np.asarray([record["path"] for record in records]),
-        scenario_ids=np.full((positive_states.shape[0],), scenario_id, dtype=np.int64),
-        num_objects=num_objects,
-        source_sample_id=source_sample_id,
-        is_external=np.ones((positive_states.shape[0],), dtype=np.int64),
-    )
+    return {
+        "context_states": context_states,
+        "positive_states": positive_states,
+        "states": positive_states,
+        "context_actions": context_actions,
+        "positive_actions": actions,
+        "actions": actions,
+        "context_mask": context_mask,
+        "positive_mask": positive_mask,
+        "mask": positive_mask,
+        "confounders": confounders,
+        "op_id": op_id,
+        "op_params": op_params,
+        "episode_ids": np.asarray([record["episode_id"] for record in records]),
+        "source_paths": np.asarray([record["path"] for record in records]),
+        "scenario_ids": np.full((positive_states.shape[0],), scenario_id, dtype=np.int64),
+        "num_objects": num_objects,
+        "source_sample_id": source_sample_id,
+        "is_external": np.ones((positive_states.shape[0],), dtype=np.int64),
+    }
+
+
+def _refresh_original_arrays(arrays: dict[str, np.ndarray], scenario_id: int) -> dict[str, np.ndarray]:
+    if not arrays:
+        return arrays
+    n = int(arrays["positive_states"].shape[0])
+    out = dict(arrays)
+    out["states"] = out["positive_states"].astype(np.float32)
+    out["mask"] = out["positive_mask"].astype(np.float32)
+    out["actions"] = out["positive_actions"].astype(np.float32)
+    param_dim = int(np.prod(out["confounders"].shape[1:])) if out["confounders"].ndim > 1 else 1
+    out["op_params"] = out["confounders"].reshape(n, param_dim).astype(np.float32)
+    out["op_id"] = _hash_confounders(out["confounders"]).astype(np.int64)
+    out["scenario_ids"] = np.full((n,), scenario_id, dtype=np.int64)
+    out["source_sample_id"] = np.arange(n, dtype=np.int64)
+    out["is_external"] = np.ones((n,), dtype=np.int64)
+    return out
+
+
+def _write_original_arrays_npz(out_path: Path, arrays: dict[str, np.ndarray]) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out_path, **arrays)
+
+
+def _original_arrays_summary(out_path: Path, arrays: dict[str, np.ndarray]) -> dict[str, Any]:
+    if not arrays:
+        return {"num_episodes": 0, "output": str(out_path), "skipped": True}
+    positive_states = arrays["positive_states"]
+    op_id = arrays["op_id"].astype(np.int64)
     return {
         "num_episodes": int(positive_states.shape[0]),
         "T": int(positive_states.shape[1] - 1),
@@ -488,34 +523,348 @@ def _write_original_split(
     }
 
 
+def _write_original_split(out_path: Path, records: list[dict[str, Any]], scenario_id: int) -> dict[str, Any]:
+    if not records:
+        return {"num_episodes": 0, "output": str(out_path), "skipped": True}
+    arrays = _records_to_original_arrays(records, scenario_id)
+    _write_original_arrays_npz(out_path, arrays)
+    return _original_arrays_summary(out_path, arrays)
+
+
+def _episode_sort_key(ep: OriginalEpisode) -> tuple[str, int, str]:
+    return (ep.scenario.lower(), int(ep.num_objects), str(ep.path))
+
+
+def _select_original_episodes(
+    episodes: list[OriginalEpisode],
+    config: CoPhyAdapterConfig,
+) -> tuple[list[OriginalEpisode], list[int], int]:
+    all_sorted = sorted(episodes, key=_episode_sort_key)
+    total_available = len(all_sorted)
+    allowed = set(config.object_counts or [])
+    filtered = [ep for ep in all_sorted if not allowed or ep.num_objects in allowed]
+    rng = np.random.default_rng(config.split_seed)
+    order = np.arange(len(filtered))
+    rng.shuffle(order)
+    selected = [filtered[int(i)] for i in order]
+    if config.max_episodes is not None:
+        selected = selected[: max(0, int(config.max_episodes))]
+    object_counts_used = sorted({int(ep.num_objects) for ep in selected})
+    return selected, object_counts_used, total_available
+
+
+def _split_ranges(n: int, splits: tuple[str, ...]) -> dict[str, tuple[int, int]]:
+    if not splits:
+        return {}
+    if len(splits) == 1:
+        return {splits[0]: (0, n)}
+    n_train = int(round(0.70 * n))
+    n_val = int(round(0.15 * n))
+    if n >= 3:
+        n_train = max(1, min(n - 2, n_train))
+        n_val = max(1, min(n - n_train - 1, n_val))
+    n_test = max(0, n - n_train - n_val)
+    canonical = {
+        "train": (0, n_train),
+        "val": (n_train, n_train + n_val),
+        "test": (n_train + n_val, n_train + n_val + n_test),
+    }
+    if set(splits).issubset(canonical):
+        return {split: canonical[split] for split in splits}
+    boundaries = np.linspace(0, n, len(splits) + 1).round().astype(int)
+    return {split: (int(boundaries[i]), int(boundaries[i + 1])) for i, split in enumerate(splits)}
+
+
+def _slice_original_arrays(arrays: dict[str, np.ndarray], start: int, end: int) -> dict[str, np.ndarray]:
+    return {key: value[start:end] for key, value in arrays.items()}
+
+
+def _concat_original_arrays(parts: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    if not parts:
+        return {}
+    keys = set.intersection(*(set(part) for part in parts))
+    arrays: dict[str, np.ndarray] = {}
+    for key in keys:
+        arrays[key] = np.concatenate([part[key] for part in parts], axis=0)
+    return arrays
+
+
+def _load_original_arrays(path: Path) -> dict[str, np.ndarray]:
+    with np.load(path, allow_pickle=False) as data:
+        return {key: data[key] for key in data.files}
+
+
+def _manifest_path(out_scenario: Path) -> Path:
+    return out_scenario / "shards" / "manifest.json"
+
+
+def _load_shard_manifest(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"shards": [], "processed_episode_paths": [], "errors": {}}
+    with path.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    manifest.setdefault("shards", [])
+    manifest.setdefault("processed_episode_paths", [])
+    manifest.setdefault("errors", {})
+    return manifest
+
+
+def _write_shard_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(_jsonable(manifest), f, indent=2, sort_keys=True)
+
+
+def _processed_paths_from_manifest(manifest: dict[str, Any]) -> set[str]:
+    paths = set(str(path) for path in manifest.get("processed_episode_paths", []))
+    for shard in manifest.get("shards", []):
+        paths.update(str(path) for path in shard.get("episode_paths", []))
+    return paths
+
+
+def _next_shard_index(manifest: dict[str, Any], shards_dir: Path) -> int:
+    indices = []
+    for shard in manifest.get("shards", []):
+        try:
+            indices.append(int(shard.get("shard_index", -1)))
+        except (TypeError, ValueError):
+            pass
+    for path in shards_dir.glob("shard_*.npz") if shards_dir.exists() else []:
+        try:
+            indices.append(int(path.stem.split("_")[-1]))
+        except ValueError:
+            pass
+    return max(indices, default=-1) + 1
+
+
+def _initial_shard_manifest(out_scenario: Path, config: CoPhyAdapterConfig) -> dict[str, Any]:
+    path = _manifest_path(out_scenario)
+    if config.resume or config.skip_existing:
+        return _load_shard_manifest(path)
+    if path.exists():
+        raise RuntimeError(
+            f"existing shard manifest found at {path}; pass --resume to continue or choose a new output directory"
+        )
+    shards_dir = path.parent
+    if shards_dir.exists() and any(shards_dir.glob("shard_*.npz")):
+        raise RuntimeError(
+            f"existing shard files found in {shards_dir}; pass --resume to continue or choose a new output directory"
+        )
+    return {"shards": [], "processed_episode_paths": [], "errors": {}}
+
+
+def _save_shard(
+    records: list[dict[str, Any]],
+    out_scenario: Path,
+    manifest: dict[str, Any],
+    scenario_id: int,
+    shard_index: int,
+) -> int:
+    if not records:
+        return shard_index
+    shards_dir = out_scenario / "shards"
+    shards_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        shard_path = shards_dir / f"shard_{shard_index:05d}.npz"
+        if not shard_path.exists():
+            break
+        shard_index += 1
+    arrays = _records_to_original_arrays(records, scenario_id)
+    _write_original_arrays_npz(shard_path, arrays)
+    episode_paths = [str(record["path"]) for record in records]
+    manifest.setdefault("shards", []).append(
+        {
+            "shard_index": int(shard_index),
+            "file": shard_path.name,
+            "path": str(shard_path),
+            "num_episodes": int(len(records)),
+            "episode_ids": [str(record["episode_id"]) for record in records],
+            "episode_paths": episode_paths,
+        }
+    )
+    manifest["processed_episode_paths"] = list(dict.fromkeys([*manifest.get("processed_episode_paths", []), *episode_paths]))
+    _write_shard_manifest(_manifest_path(out_scenario), manifest)
+    return shard_index + 1
+
+
+def _load_arrays_from_manifest(out_scenario: Path, manifest: dict[str, Any]) -> dict[str, np.ndarray]:
+    parts: list[dict[str, np.ndarray]] = []
+    for shard in sorted(manifest.get("shards", []), key=lambda item: int(item.get("shard_index", 0))):
+        shard_path = Path(shard.get("path", ""))
+        if not shard_path.exists():
+            shard_path = out_scenario / "shards" / str(shard.get("file", ""))
+        if shard_path.exists():
+            parts.append(_load_original_arrays(shard_path))
+    return _concat_original_arrays(parts)
+
+
+def _process_episode_batch(
+    episodes: list[OriginalEpisode],
+    config: CoPhyAdapterConfig,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    def one(ep: OriginalEpisode) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
+        try:
+            return _episode_features(ep, config), None
+        except Exception as exc:
+            return None, (str(ep.path), str(exc))
+
+    if config.num_workers > 1 and len(episodes) > 1:
+        with ThreadPoolExecutor(max_workers=int(config.num_workers)) as executor:
+            results = list(executor.map(one, episodes))
+    else:
+        results = [one(ep) for ep in episodes]
+    records = [record for record, error in results if record is not None]
+    errors = {str(path): str(message) for record, error in results if error is not None for path, message in [error]}
+    return records, errors
+
+
+def _format_eta(seconds: float) -> str:
+    if seconds == float("inf") or seconds < 0:
+        return "unknown"
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{sec:02d}s"
+    if minutes:
+        return f"{minutes}m{sec:02d}s"
+    return f"{sec}s"
+
+
+def _print_progress(done: int, total: int, start_time: float, current_path: str) -> None:
+    elapsed = max(1e-9, time.monotonic() - start_time)
+    rate = done / elapsed
+    eta = (total - done) / rate if rate > 0 else float("inf")
+    print(
+        f"[cophy_adapter] processed {done}/{total} | elapsed {_format_eta(elapsed)} | "
+        f"{rate:.3f} episodes/sec | ETA {_format_eta(eta)} | current {current_path}",
+        flush=True,
+    )
+
+
+def _write_final_splits(
+    out_scenario: Path,
+    arrays: dict[str, np.ndarray],
+    scenario_id: int,
+    splits: tuple[str, ...],
+) -> dict[str, Any]:
+    if not arrays:
+        return {split: {"num_episodes": 0, "output": str(out_scenario / f"{split}.npz"), "skipped": True} for split in splits}
+    arrays = _refresh_original_arrays(arrays, scenario_id)
+    split_meta: dict[str, Any] = {}
+    n = int(arrays["positive_states"].shape[0])
+    for split, (start, end) in _split_ranges(n, splits).items():
+        out_path = out_scenario / f"{split}.npz"
+        split_arrays = _refresh_original_arrays(_slice_original_arrays(arrays, start, end), scenario_id)
+        if end <= start:
+            split_meta[split] = {"num_episodes": 0, "output": str(out_path), "skipped": True}
+            continue
+        _write_original_arrays_npz(out_path, split_arrays)
+        split_meta[split] = _original_arrays_summary(out_path, split_arrays)
+    return split_meta
+
+
 def _build_original_video_dataset(config: CoPhyAdapterConfig) -> dict[str, Any]:
     episodes = _collect_original_episodes(config.root, config.scenario, config.mode)
-    if config.max_episodes is not None:
-        episodes = episodes[: int(config.max_episodes)]
+    selected_episodes, object_counts_used, total_available = _select_original_episodes(episodes, config)
     out_scenario = config.out / config.scenario
     out_scenario.mkdir(parents=True, exist_ok=True)
-    split_eps = _split_episodes(episodes, config.split_seed)
+    if len(selected_episodes) > 10000 and config.max_episodes is None and not config.save_shards:
+        print(
+            "Large preprocessing without shards may take many hours and lose progress in Colab.",
+            flush=True,
+        )
+        if not config.force_full:
+            time.sleep(5)
     split_meta: dict[str, Any] = {}
     errors: dict[str, str] = {}
     scenario_id = 0
-    for split in config.splits:
-        records = []
-        for ep in split_eps.get(split, []):
-            try:
-                records.append(_episode_features(ep, config))
-            except Exception as exc:
-                errors[str(ep.path)] = str(exc)
-        split_meta[split] = _write_original_split(out_scenario / f"{split}.npz", records, scenario_id)
+    records_for_merge: list[dict[str, Any]] = []
+    manifest: dict[str, Any] = {"shards": [], "processed_episode_paths": [], "errors": {}}
+    completed_paths: set[str] = set()
+    next_shard = 0
+    if config.save_shards:
+        manifest = _initial_shard_manifest(out_scenario, config)
+        completed_paths = _processed_paths_from_manifest(manifest) if (config.resume or config.skip_existing) else set()
+        next_shard = _next_shard_index(manifest, out_scenario / "shards")
+        if completed_paths:
+            print(f"[cophy_adapter] resume/skip-existing: {len(completed_paths)} episode(s) already processed", flush=True)
+
+    start_time = time.monotonic()
+    shard_records: list[dict[str, Any]] = []
+    selected_paths = [str(ep.path) for ep in selected_episodes]
+    already_done = len([path for path in selected_paths if path in completed_paths])
+    attempted = already_done
+    batch_size = max(1, int(config.progress_every)) if config.num_workers > 1 else 1
+    if config.save_shards:
+        batch_size = max(1, min(int(config.shard_size), max(1, int(config.progress_every))))
+    remaining: list[OriginalEpisode] = [ep for ep in selected_episodes if str(ep.path) not in completed_paths]
+    for offset in range(0, len(remaining), batch_size):
+        batch = remaining[offset : offset + batch_size]
+        batch_records, batch_errors = _process_episode_batch(batch, config)
+        errors.update(batch_errors)
+        attempted += len(batch)
+        if config.save_shards:
+            shard_records.extend(batch_records)
+            if len(shard_records) >= int(config.shard_size):
+                next_shard = _save_shard(shard_records, out_scenario, manifest, scenario_id, next_shard)
+                shard_records = []
+        else:
+            records_for_merge.extend(batch_records)
+        if attempted == len(selected_episodes) or attempted % max(1, int(config.progress_every)) == 0:
+            current = str(batch[-1].path) if batch else ""
+            _print_progress(attempted, len(selected_episodes), start_time, current)
+
+    if config.save_shards and shard_records:
+        next_shard = _save_shard(shard_records, out_scenario, manifest, scenario_id, next_shard)
+        shard_records = []
+    if config.save_shards:
+        errors = {**manifest.get("errors", {}), **errors}
+        manifest["errors"] = errors
+        _write_shard_manifest(_manifest_path(out_scenario), manifest)
+
+    arrays: dict[str, np.ndarray] = {}
+    if not config.no_final_merge:
+        if config.save_shards:
+            manifest = _load_shard_manifest(_manifest_path(out_scenario))
+            arrays = _load_arrays_from_manifest(out_scenario, manifest)
+        elif records_for_merge:
+            arrays = _records_to_original_arrays(records_for_merge, scenario_id)
+        split_meta = _write_final_splits(out_scenario, arrays, scenario_id, config.splits)
+    elif config.save_shards:
+        manifest = _load_shard_manifest(_manifest_path(out_scenario))
+
+    processed_episodes = int(arrays["positive_states"].shape[0]) if arrays else len(records_for_merge)
+    if config.save_shards:
+        processed_episodes = len(_processed_paths_from_manifest(manifest))
+    shards_written = len(manifest.get("shards", [])) if config.save_shards else 0
+    completed = processed_episodes >= len(selected_episodes) and not errors
     metadata = {
         "dataset": "CoPhy",
         "scenario": config.scenario,
         "mode": config.mode,
         "root": str(config.root),
         "output_dir": str(out_scenario),
+        "total_available_episodes": int(total_available),
+        "selected_episodes": int(len(selected_episodes)),
+        "processed_episodes": int(processed_episodes),
+        "object_counts_used": object_counts_used,
+        "max_episodes": config.max_episodes,
         "num_frames": config.num_frames,
         "nmax": config.nmax,
         "feature_dim": FEATURE_D,
         "split_seed": config.split_seed,
+        "progress_every": config.progress_every,
+        "save_shards": config.save_shards,
+        "shard_size": config.shard_size,
+        "shards_written": int(shards_written),
+        "resume": config.resume,
+        "skip_existing": config.skip_existing,
+        "num_workers": config.num_workers,
+        "no_final_merge": config.no_final_merge,
+        "completed": bool(completed),
+        "final_merge_completed": bool(not config.no_final_merge),
+        "shard_manifest": str(_manifest_path(out_scenario)) if config.save_shards else None,
+        "shards": manifest.get("shards", []) if config.save_shards else [],
         "splits": split_meta,
         "errors": errors,
         "format": "paired AB/CD feature arrays; AB is context, CD is positive trajectory",
@@ -585,6 +934,15 @@ def main() -> None:
     parser.add_argument("--splits", type=str, nargs="*", default=["train", "val", "test"])
     parser.add_argument("--mode", type=str, default="segm_features", choices=["state", "feature", "segm_features", "rgb_features"])
     parser.add_argument("--max-episodes", type=int, default=None)
+    parser.add_argument("--object-counts", type=int, nargs="*", default=None)
+    parser.add_argument("--progress-every", type=int, default=100)
+    parser.add_argument("--save-shards", action="store_true")
+    parser.add_argument("--shard-size", type=int, default=1000)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--no-final-merge", action="store_true")
+    parser.add_argument("--force-full", action="store_true")
     parser.add_argument("--num-frames", type=int, default=20)
     parser.add_argument("--nmax", type=int, default=9)
     parser.add_argument("--split-seed", type=int, default=0)
@@ -600,9 +958,30 @@ def main() -> None:
             num_frames=args.num_frames,
             nmax=args.nmax,
             split_seed=args.split_seed,
+            object_counts=tuple(args.object_counts) if args.object_counts is not None else None,
+            progress_every=args.progress_every,
+            save_shards=args.save_shards,
+            shard_size=args.shard_size,
+            resume=args.resume,
+            skip_existing=args.skip_existing,
+            num_workers=args.num_workers,
+            no_final_merge=args.no_final_merge,
+            force_full=args.force_full,
         )
     )
-    print(json.dumps({"scenario": metadata["scenario"], "splits": sorted(metadata["splits"]), "errors": metadata["errors"]}, indent=2))
+    print(
+        json.dumps(
+            {
+                "scenario": metadata["scenario"],
+                "splits": sorted(metadata.get("splits", {})),
+                "processed_episodes": metadata.get("processed_episodes"),
+                "shards_written": metadata.get("shards_written"),
+                "completed": metadata.get("completed"),
+                "errors": metadata["errors"],
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

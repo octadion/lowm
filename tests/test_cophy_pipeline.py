@@ -166,6 +166,17 @@ def _segm_frames(shift: int = 0) -> np.ndarray:
     return frames
 
 
+def _write_original_episode(root: Path, object_count: int, episode_id: str, offset: float = 0.0) -> Path:
+    episode = root / "ballsCF" / str(object_count) / episode_id
+    for branch in ["ab", "cd"]:
+        (episode / branch).mkdir(parents=True, exist_ok=True)
+        (episode / branch / "segm.mp4").write_bytes(b"")
+        (episode / branch / "rgb.mp4").write_bytes(b"")
+    np.save(episode / "confounders.npy", (np.arange(27, dtype=np.float32).reshape(9, 3) + offset))
+    (episode / "explanations.txt").write_text("intervention text\n", encoding="utf-8")
+    return episode
+
+
 def test_segmentation_feature_extraction_from_frames() -> None:
     features, mask, colors = extract_segmentation_features_from_frames(_segm_frames(), nmax=9)
     assert features.shape == (6, 9, 7)
@@ -242,3 +253,156 @@ def test_original_cophy_structure_segm_features_adapter(tmp_path: Path, monkeypa
     sample = dataset[0]
     assert sample["context_states"].shape == (2, 2, 9, 7)
     assert sample["pos_states"].shape == (4, 9, 7)
+
+
+def test_cophy_adapter_max_episodes_object_counts_and_metadata(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(3):
+        _write_original_episode(root, 2, f"episode_2_{idx:04d}", offset=float(idx))
+    for idx in range(2):
+        _write_original_episode(root, 3, f"episode_3_{idx:04d}", offset=10.0 + float(idx))
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    out = tmp_path / "processed"
+    metadata = build_cophy_dataset(
+        CoPhyAdapterConfig(
+            root=root,
+            out=out,
+            scenario="ballsCF",
+            mode="segm_features",
+            max_episodes=2,
+            object_counts=(2,),
+            progress_every=1,
+            num_frames=5,
+            nmax=9,
+            split_seed=0,
+        )
+    )
+    required = {
+        "total_available_episodes",
+        "processed_episodes",
+        "object_counts_used",
+        "max_episodes",
+        "num_frames",
+        "nmax",
+        "feature_dim",
+        "split_seed",
+        "save_shards",
+        "shard_size",
+        "shards_written",
+        "completed",
+    }
+    assert required.issubset(metadata)
+    assert metadata["total_available_episodes"] == 5
+    assert metadata["selected_episodes"] == 2
+    assert metadata["processed_episodes"] == 2
+    assert metadata["object_counts_used"] == [2]
+    assert metadata["completed"] is True
+    total = 0
+    for split in ["train", "val", "test"]:
+        path = out / "ballsCF" / f"{split}.npz"
+        if path.exists():
+            with np.load(path) as data:
+                total += int(data["positive_states"].shape[0])
+                assert set(data["num_objects"].tolist()).issubset({2})
+    assert total == 2
+
+
+def test_cophy_adapter_save_shards_writes_manifest_and_final_splits(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(5):
+        _write_original_episode(root, 2, f"episode_{idx:04d}", offset=float(idx))
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    out = tmp_path / "processed"
+    metadata = build_cophy_dataset(
+        CoPhyAdapterConfig(
+            root=root,
+            out=out,
+            scenario="ballsCF",
+            mode="segm_features",
+            max_episodes=5,
+            save_shards=True,
+            shard_size=2,
+            progress_every=1,
+            num_frames=5,
+            nmax=9,
+            split_seed=0,
+        )
+    )
+    shards_dir = out / "ballsCF" / "shards"
+    manifest_path = shards_dir / "manifest.json"
+    assert metadata["save_shards"] is True
+    assert metadata["shards_written"] == 3
+    assert metadata["completed"] is True
+    assert manifest_path.exists()
+    with manifest_path.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    assert len(manifest["shards"]) == 3
+    assert len(manifest["processed_episode_paths"]) == 5
+    assert len(list(shards_dir.glob("shard_*.npz"))) == 3
+    assert (out / "ballsCF" / "train.npz").exists()
+    assert (out / "ballsCF" / "val.npz").exists()
+    assert (out / "ballsCF" / "test.npz").exists()
+
+
+def test_cophy_adapter_resume_skips_processed_shards(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(5):
+        _write_original_episode(root, 2, f"episode_{idx:04d}", offset=float(idx))
+
+    calls: list[str] = []
+
+    def fake_read_video(path: Path):
+        calls.append(str(path))
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    out = tmp_path / "processed"
+    first = build_cophy_dataset(
+        CoPhyAdapterConfig(
+            root=root,
+            out=out,
+            scenario="ballsCF",
+            mode="segm_features",
+            max_episodes=2,
+            save_shards=True,
+            shard_size=2,
+            progress_every=1,
+            no_final_merge=True,
+            num_frames=5,
+            nmax=9,
+            split_seed=0,
+        )
+    )
+    assert first["processed_episodes"] == 2
+    assert len(calls) == 4
+    calls.clear()
+    second = build_cophy_dataset(
+        CoPhyAdapterConfig(
+            root=root,
+            out=out,
+            scenario="ballsCF",
+            mode="segm_features",
+            max_episodes=4,
+            save_shards=True,
+            shard_size=2,
+            progress_every=1,
+            resume=True,
+            no_final_merge=True,
+            num_frames=5,
+            nmax=9,
+            split_seed=0,
+        )
+    )
+    assert second["processed_episodes"] == 4
+    assert len(calls) == 4
+    with (out / "ballsCF" / "shards" / "manifest.json").open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    assert len(manifest["processed_episode_paths"]) == 4
