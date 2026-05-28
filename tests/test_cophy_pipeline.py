@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 import numpy as np
+import pytest
 import torch
 import yaml
 
@@ -9,6 +10,7 @@ import lowm.data.cophy_adapter as cophy_adapter
 from lowm.data.cophy_adapter import CoPhyAdapterConfig, build_cophy_dataset, extract_segmentation_features_from_frames
 from lowm.data.dataset import LOWMSynthRankingDataset, RankingConfig
 from lowm.data.inspect_cophy import inspect_cophy
+from lowm.data.merge_cophy_partitions import merge_cophy_partitions
 from lowm.eval.aggregate_cophy_omc import aggregate_cophy_omc
 from lowm.eval.evaluate_cophy_ranking import evaluate_cophy_ranking
 from lowm.models.lowm import LOWM, LOWMConfig
@@ -406,3 +408,204 @@ def test_cophy_adapter_resume_skips_processed_shards(tmp_path: Path, monkeypatch
     with (out / "ballsCF" / "shards" / "manifest.json").open("r", encoding="utf-8") as f:
         manifest = json.load(f)
     assert len(manifest["processed_episode_paths"]) == 4
+
+
+def _manifest_episode_paths(part_scenario: Path) -> list[str]:
+    with (part_scenario / "shards" / "manifest.json").open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    return [str(path) for path in manifest["processed_episode_paths"]]
+
+
+def test_cophy_partitioning_has_no_duplicates_and_covers_selection(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(7):
+        _write_original_episode(root, 2, f"episode_{idx:04d}", offset=float(idx))
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    part_paths: list[Path] = []
+    for part_idx in range(3):
+        out = tmp_path / f"part{part_idx}"
+        metadata = build_cophy_dataset(
+            CoPhyAdapterConfig(
+                root=root,
+                out=out,
+                scenario="ballsCF",
+                mode="segm_features",
+                max_episodes=7,
+                save_shards=True,
+                shard_size=2,
+                no_final_merge=True,
+                num_partitions=3,
+                partition_index=part_idx,
+                progress_every=1,
+                num_frames=5,
+                nmax=9,
+                split_seed=42,
+            )
+        )
+        assert metadata["num_partitions"] == 3
+        assert metadata["partition_index"] == part_idx
+        assert metadata["selected_episodes_before_partition"] == 7
+        part_paths.append(out / "ballsCF")
+
+    all_paths = [path for part in part_paths for path in _manifest_episode_paths(part)]
+    assert len(all_paths) == 7
+    assert len(set(all_paths)) == 7
+
+
+def test_merge_cophy_partitions_creates_splits_and_metadata(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(6):
+        _write_original_episode(root, 2, f"episode_{idx:04d}", offset=float(idx))
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    parts: list[Path] = []
+    for part_idx in range(2):
+        out = tmp_path / f"part{part_idx}"
+        build_cophy_dataset(
+            CoPhyAdapterConfig(
+                root=root,
+                out=out,
+                scenario="ballsCF",
+                mode="segm_features",
+                max_episodes=6,
+                save_shards=True,
+                shard_size=2,
+                no_final_merge=True,
+                num_partitions=2,
+                partition_index=part_idx,
+                progress_every=1,
+                num_frames=5,
+                nmax=9,
+                split_seed=0,
+            )
+        )
+        parts.append(out / "ballsCF")
+
+    merged = tmp_path / "merged" / "ballsCF"
+    metadata = merge_cophy_partitions(parts, merged, split_seed=123)
+    assert metadata["total_merged_episodes"] == 6
+    assert metadata["duplicate_check_passed"] is True
+    assert (merged / "train.npz").exists()
+    assert (merged / "val.npz").exists()
+    assert (merged / "test.npz").exists()
+    assert (merged / "metadata.json").exists()
+    assert (merged / "merged_manifest.json").exists()
+    with np.load(merged / "train.npz") as data:
+        assert "context_states" in data.files
+        assert "positive_states" in data.files
+        assert "confounders" in data.files
+        assert "episode_paths" in data.files
+        assert "object_count" in data.files
+
+
+def test_merge_cophy_partitions_detects_duplicates(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(2):
+        _write_original_episode(root, 2, f"episode_{idx:04d}", offset=float(idx))
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    out = tmp_path / "part0"
+    build_cophy_dataset(
+        CoPhyAdapterConfig(
+            root=root,
+            out=out,
+            scenario="ballsCF",
+            mode="segm_features",
+            max_episodes=2,
+            save_shards=True,
+            shard_size=2,
+            no_final_merge=True,
+            progress_every=1,
+            num_frames=5,
+            nmax=9,
+        )
+    )
+    with pytest.raises(ValueError, match="duplicate CoPhy episode paths"):
+        merge_cophy_partitions([out / "ballsCF", out / "ballsCF"], tmp_path / "merged" / "ballsCF")
+
+
+def test_cophy_benchmark_runs_on_tiny_fake_dataset(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    for idx in range(2):
+        _write_original_episode(root, 2, f"episode_{idx:04d}", offset=float(idx))
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    csv_path = tmp_path / "benchmark_cophy_preprocessing.csv"
+    md_path = tmp_path / "benchmark_cophy_preprocessing.md"
+    rows = cophy_adapter.run_cophy_benchmark(
+        CoPhyAdapterConfig(
+            root=root,
+            out=tmp_path / "benchmark_out",
+            scenario="ballsCF",
+            mode="segm_features",
+            num_frames=5,
+            nmax=9,
+            progress_every=1,
+        ),
+        out_csv=csv_path,
+        out_md=md_path,
+        benchmark_episodes=2,
+        num_workers_values=(1,),
+        worker_backends=("thread",),
+        decode_modes=("sequential",),
+        segm_resizes=(None,),
+        color_modes=("palette_union",),
+        compressions=("none",),
+    )
+    assert len(rows) == 1
+    assert rows[0]["processed_episodes"] == 2
+    assert csv_path.exists()
+    assert md_path.exists()
+
+
+def test_cophy_metadata_contains_performance_fields(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "raw_original"
+    _write_original_episode(root, 2, "episode_0000", offset=0.0)
+
+    def fake_read_video(path: Path):
+        return _segm_frames(shift=1 if "cd" in str(path) else 0)
+
+    monkeypatch.setattr(cophy_adapter, "_read_video", fake_read_video)
+    metadata = build_cophy_dataset(
+        CoPhyAdapterConfig(
+            root=root,
+            out=tmp_path / "processed",
+            scenario="ballsCF",
+            mode="segm_features",
+            max_episodes=1,
+            num_frames=5,
+            nmax=9,
+            worker_backend="thread",
+            num_workers=1,
+            decode_mode="sequential",
+            color_mode="palette_union",
+            compression="none",
+        )
+    )
+    for key in [
+        "total_seconds",
+        "episodes_per_sec",
+        "seconds_per_episode",
+        "num_workers",
+        "worker_backend",
+        "decode_mode",
+        "segm_resize",
+        "color_mode",
+        "compression",
+        "local_tmp_used",
+    ]:
+        assert key in metadata
+    assert metadata["processed_episodes"] == 1
