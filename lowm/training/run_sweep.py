@@ -53,17 +53,64 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _set_nested(config: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     cursor = config
     for key in path[:-1]:
-        cursor = cursor.setdefault(key, {})
+        next_value = cursor.setdefault(key, {})
+        if not isinstance(next_value, dict):
+            next_value = {}
+            cursor[key] = next_value
+        cursor = next_value
     cursor[path[-1]] = value
 
 
-def _deep_update(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+def set_by_dotted_key(config: dict[str, Any], dotted_key: str, value: Any) -> None:
+    """Set a nested config value from a dotted key, creating dictionaries."""
+
+    parts = tuple(part for part in str(dotted_key).split(".") if part)
+    if not parts:
+        raise ValueError("override key must not be empty")
+    _set_nested(config, parts, value)
+
+
+def apply_overrides(config: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply nested or dotted-key overrides in place."""
+
     for key, value in overrides.items():
-        if isinstance(value, Mapping) and isinstance(base.get(key), dict):
-            _deep_update(base[key], value)
+        if "." in str(key):
+            set_by_dotted_key(config, str(key), value)
+            continue
+        if isinstance(value, Mapping):
+            existing = config.get(str(key))
+            if not isinstance(existing, dict):
+                existing = {}
+                config[str(key)] = existing
+            apply_overrides(existing, value)
         else:
-            base[key] = value
-    return base
+            config[str(key)] = value
+    return config
+
+
+def _deep_update(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    return apply_overrides(base, overrides)
+
+
+def _variant_config_overrides(params: Mapping[str, Any]) -> dict[str, Any]:
+    overrides = params.get("overrides", {})
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, Mapping):
+        raise ValueError("variant overrides must be a mapping")
+    return dict(overrides)
+
+
+def _config_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): value for key, value in params.items() if key != "overrides"}
+
+
+def _dataset_paths(config: Mapping[str, Any]) -> tuple[Path, Path, Path]:
+    data_cfg = dict(config.get("data", {}))
+    root = Path(str(data_cfg.get("root", "data/lowm_synth_v0")))
+    train_path = root / str(data_cfg.get("train_split", "train.npz"))
+    val_path = root / str(data_cfg.get("val_split", "val.npz"))
+    return root, train_path, val_path
 
 
 def _fmt_value(value: Any) -> str:
@@ -120,25 +167,29 @@ def expand_sweep(sweep: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def build_run_config(base_config: Mapping[str, Any], params: Mapping[str, Any], sweep_dir: Path, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     config = deepcopy(dict(base_config))
-    if overrides:
-        _deep_update(config, overrides)
-    for key, value in params.items():
+    config_params = _config_params(params)
+    for key, value in config_params.items():
         if key in METADATA_ONLY_PARAMS:
             continue
         if key not in SWEEP_TO_CONFIG_PATH:
             raise ValueError(f"unsupported sweep parameter '{key}'")
         _set_nested(config, SWEEP_TO_CONFIG_PATH[key], value)
-    seed = int(params.get("seed", config.get("training", {}).get("seed", config.get("seed", 0))))
+    variant_overrides = _variant_config_overrides(params)
+    if variant_overrides:
+        apply_overrides(config, variant_overrides)
+    seed = int(config_params.get("seed", config.get("training", {}).get("seed", config.get("seed", 0))))
     config["seed"] = seed
     _set_nested(config, ("training", "seed"), seed)
     _set_nested(config, ("training", "output_dir"), str(sweep_dir / "runs"))
-    _set_nested(config, ("training", "run_name"), run_name_from_params(params))
-    model_type = str(params.get("model_type", "lowm"))
+    _set_nested(config, ("training", "run_name"), run_name_from_params(config_params))
+    model_type = str(config_params.get("model_type", "lowm"))
     if model_type in {"fixed_energy", "direct_context_energy"}:
         _set_nested(config, ("training", "baseline"), model_type)
     else:
-        _set_nested(config, ("training", "use_occl"), bool(params.get("use_occl", config.get("training", {}).get("use_occl", True))))
-    config["sweep_params"] = dict(params)
+        _set_nested(config, ("training", "use_occl"), bool(config_params.get("use_occl", config.get("training", {}).get("use_occl", True))))
+    if overrides:
+        apply_overrides(config, overrides)
+    config["sweep_params"] = dict(config_params)
     return config
 
 
@@ -146,6 +197,56 @@ def _write_run_config(config: Mapping[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(dict(config), f, sort_keys=False)
+
+
+def _resolved_text(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False))
+    except TypeError:
+        return str(path.resolve())
+
+
+def _print_dry_run_config(run_name: str, config: Mapping[str, Any], run_dir: Path, checkpoint_name: str) -> None:
+    data_cfg = dict(config.get("data", {}))
+    model_cfg = dict(config.get("model", {}))
+    training_cfg = dict(config.get("training", {}))
+    root, _, _ = _dataset_paths(config)
+    checkpoint_path = run_dir / "checkpoints" / checkpoint_name
+    print(
+        "\n".join(
+            [
+                f"dry-run {run_name}",
+                f"  data.root: {_resolved_text(root)}",
+                f"  training.output_dir: {training_cfg.get('output_dir')}",
+                f"  model.object_dim: {model_cfg.get('object_dim')}",
+                f"  data.max_objects: {data_cfg.get('max_objects')}",
+                f"  checkpoint_path: {checkpoint_path}",
+                f"  run_dir: {run_dir}",
+            ]
+        )
+    )
+
+
+def _validate_training_inputs(run_name: str, config: Mapping[str, Any]) -> None:
+    data_cfg = dict(config.get("data", {}))
+    if bool(data_cfg.get("generate_if_missing", False)):
+        return
+    root, train_path, val_path = _dataset_paths(config)
+    missing = [path for path in (train_path, val_path) if not path.exists()]
+    if not missing:
+        return
+    raise FileNotFoundError(
+        "\n".join(
+            [
+                f"missing dataset files for generated run '{run_name}'",
+                f"resolved data.root: {_resolved_text(root)}",
+                f"train_path: {train_path}",
+                f"val_path: {val_path}",
+                f"missing: {[str(path) for path in missing]}",
+                "hint: set overrides.data.root or overrides['data.root'] to the directory containing train.npz and val.npz",
+            ]
+        )
+    )
 
 
 def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = None) -> list[Path]:
@@ -188,7 +289,9 @@ def run_sweep(config_path: Path, dry_run: bool = False, max_runs: int | None = N
         run_paths.append(run_dir)
         print(f"prepared {run_name}")
         if dry_run or bool(sweep.get("dry_run", False)):
+            _print_dry_run_config(run_name, run_config, run_dir, ranking_checkpoint)
             continue
+        _validate_training_inputs(run_name, run_config)
         model_type = str(params.get("model_type", "lowm"))
         if model_type in {"fixed_energy", "direct_context_energy"}:
             train_baseline(generated_config)

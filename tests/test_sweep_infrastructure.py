@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from lowm.eval.aggregate_sweep import aggregate_sweep
@@ -166,6 +167,117 @@ def test_ood_sweep_dry_run_supports_baseline_and_multisplit(tmp_path: Path) -> N
     baseline_configs = [config for config in configs if config["sweep_params"]["model_type"] == "direct_context_energy"]
     assert baseline_configs[0]["training"]["baseline"] == "direct_context_energy"
     assert any(config["sweep_params"]["variant"] == "lowm_omcr_no_pairwise" for config in configs)
+
+
+def test_sweep_global_dotted_overrides_win_after_variant_defaults(tmp_path: Path, capsys) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "root": "data/cophy_omc/ballsCF",
+                    "train_split": "train.npz",
+                    "val_split": "val.npz",
+                    "generate_if_missing": False,
+                },
+                "ranking": {"negative_types": ["law_mismatch"]},
+                "model": {"lambda_dim": 8, "object_dim": 7},
+                "training": {"seed": 0, "output_dir": "runs/default", "device": "auto", "epochs": 5},
+            }
+        ),
+        encoding="utf-8",
+    )
+    custom_dataset = tmp_path / "custom_dataset"
+    variant_dataset = tmp_path / "variant_dataset"
+    custom_output = tmp_path / "custom_runs"
+    sweep = tmp_path / "sweep.yaml"
+    sweep.write_text(
+        yaml.safe_dump(
+            {
+                "base_config": str(base),
+                "sweep_dir": str(tmp_path / "sweep"),
+                "variants": [
+                    {
+                        "variant": "lowm_cophy_OMC",
+                        "model_type": "lowm",
+                        "seed": 0,
+                        "negative_types": ["law_mismatch"],
+                        "overrides": {
+                            "data.root": str(variant_dataset),
+                            "model.object_dim": 5,
+                            "data.max_objects": 5,
+                        },
+                    }
+                ],
+                "overrides": {
+                    "data.root": str(custom_dataset),
+                    "training.output_dir": str(custom_output),
+                    "model.object_dim": 9,
+                    "data.max_objects": 9,
+                    "training.device": "cpu",
+                    "training.epochs": 1,
+                },
+                "evaluation": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runs = run_sweep(sweep, dry_run=True)
+    assert len(runs) == 1
+    generated_path = tmp_path / "sweep" / "configs" / f"{runs[0].name}.yaml"
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    assert generated["data"]["root"] == str(custom_dataset)
+    assert generated["data"]["root"] != str(variant_dataset)
+    assert generated["training"]["output_dir"] == str(custom_output)
+    assert generated["model"]["object_dim"] == 9
+    assert generated["data"]["max_objects"] == 9
+    assert generated["training"]["device"] == "cpu"
+    assert generated["training"]["epochs"] == 1
+    captured = capsys.readouterr().out
+    assert "data.root:" in captured
+    assert str(custom_dataset.resolve(strict=False)) in captured
+
+
+def test_sweep_missing_dataset_error_reports_resolved_path(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "data": {
+                    "root": "data/cophy_omc/ballsCF",
+                    "train_split": "train.npz",
+                    "val_split": "val.npz",
+                    "generate_if_missing": False,
+                },
+                "ranking": {"negative_types": ["law_mismatch"]},
+                "model": {"lambda_dim": 8, "object_dim": 7},
+                "training": {"seed": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    missing_dataset = tmp_path / "missing_dataset"
+    sweep = tmp_path / "sweep.yaml"
+    sweep.write_text(
+        yaml.safe_dump(
+            {
+                "base_config": str(base),
+                "sweep_dir": str(tmp_path / "sweep"),
+                "variants": [{"variant": "lowm_cophy_OMC", "model_type": "lowm", "seed": 0, "negative_types": ["law_mismatch"]}],
+                "overrides": {"data": {"root": str(missing_dataset)}},
+                "evaluation": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FileNotFoundError) as exc_info:
+        run_sweep(sweep, dry_run=False, max_runs=1)
+    message = str(exc_info.value)
+    assert "lowm_cophy_OMC" in message
+    assert str(missing_dataset.resolve(strict=False)) in message
+    assert str(missing_dataset / "train.npz") in message
+    assert str(missing_dataset / "val.npz") in message
+    assert "overrides.data.root" in message
 
 
 def _write_json(path: Path, payload: dict) -> None:
